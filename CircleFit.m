@@ -1,11 +1,11 @@
-function [x, y, R] = CircleFit(X, Y, w, plot_flag)
+function [x, y, R, error] = CircleFit(X, Y, w, plot_flag)
 %% Circular Fitting
 % From "Best Fit Circles made Easy" by Han de Bruijin
 % URL: http://www.alternatievewiskunde.nl/jaar2006/kromming.pdf
 % Robert Israel's method implemented by MATLAB 
 % Implemented by JinHwan Jeon, 2022
 
-% [x, y, R] = CircleFit(X, Y, w)
+% [x, y, R, error] = CircleFit(X, Y, w)
 % 
 % Returns best fit circle given 2D data points and corresponding weights
 
@@ -19,7 +19,7 @@ function [x, y, R] = CircleFit(X, Y, w, plot_flag)
 % x: x coordinate of optimized circle's center point
 % y: y coordinate of optimized circle's center point
 % R: radius of optimized circle
-% (TBD) fitting error based on weighting factors
+% error: fitting error information
 
 % For understanding the implementation below, please read the paper
 % provided in the URL above
@@ -79,7 +79,7 @@ function [x, y, R] = CircleFit(X, Y, w, plot_flag)
     if ~isreal(R)
         warning('Complex radius detected, adjust dataset')
     end
-
+    %% Plot Results
     if plot_flag
         figure(1);
         p_data = plot(X, Y, 'ro'); hold on; grid on; axis equal; 
@@ -93,4 +93,20 @@ function [x, y, R] = CircleFit(X, Y, w, plot_flag)
         xlabel('X'); ylabel('Y'); title('Circular Fitting');
         legend([p_data, p_fit],'Original dataset', 'Optimized Circle')
     end
+
+    %% Compute Fitting Error
+    D = sqrt((X - x).^2 + (Y - y).^2);
+    error = struct();
+    error.full = D - R; % Naive Error
+
+    % Non-Weighted Error Computation 
+    error.se = sum((error.full).^2);
+    error.mse = error.se / length(D);
+    error.rmse = sqrt(error.mse);
+
+    % Weighted Error Computation
+    error.wse = sum((error.full).^2./w);
+    error.wmse = error.wse / length(D);
+    error.wrmse = sqrt(error.wmse);
+
 end
