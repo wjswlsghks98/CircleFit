@@ -1,10 +1,10 @@
-function [x, y, R, delL, theta, error] = CircleFitV2(X_l, X_r, Y_l, Y_r, w_l, w_r, plot_flag)
+function [x, y, R, delL, theta, err] = CircleFitV2(varargin)
 %% Circular Fitting for 2 Parallel Lanes
 % Upgraded version from CircleFit for 2 lanes
 % Since 2 lanes are parallel, they should share the same circle
 % Implemented by JinHwan Jeon, 2022
 
-% [x, y, R, delL, error] = CircleFit(X_l, X_r, Y_l, Y_r, w_l, w_r)
+% [x, y, R, delL, error] = CircleFit(X_l, X_r, Y_l, Y_r, w_l, w_r, plot_flag, init_flag, (lin_var: optional))
 % 
 % Returns best fit circle given 2D data points and corresponding weights
 
@@ -13,6 +13,8 @@ function [x, y, R, delL, theta, error] = CircleFitV2(X_l, X_r, Y_l, Y_r, w_l, w_
 % Y_l, Y_r: y coordinates of data points for left and right lanes
 % w_l, w_r: weighting factor for particular point (left and right lanes)
 % plot_flag: boolean for plotting fit results
+% init_flag: boolean for indicating current segment is intial or not
+% lin_var: if not initial, perform constrained Least Squares using lin_var
 
 %% Output
 % x: x coordinate of optimized circle's center point
@@ -23,6 +25,29 @@ function [x, y, R, delL, theta, error] = CircleFitV2(X_l, X_r, Y_l, Y_r, w_l, w_
 % theta: effective center circle angle
 % error: fitting error information    
     
+    %% Register Variables
+    X_l = varargin{1};
+    X_r = varargin{2};
+    Y_l = varargin{3};
+    Y_r = varargin{4};
+    w_l = varargin{5};
+    w_r = varargin{6};
+    plot_flag = varargin{7};
+    init_flag = varargin{8};
+
+    if init_flag == true && length(varargin) > 8
+        error('To much input for initial arc segment fitting')
+    elseif init_flag == false && length(varargin) == 8
+        error('Not enough input for arc segment fitting')
+    end
+
+    if ~init_flag
+        lin_var = varargin{9}; 
+        m = lin_var(1); n = lin_var(2);
+        % m: slope, n: ordinate
+    end
+
+    %% Weighted Least Squares modeling for Circular Fitting
     % Data shifting to minimize scaling error 
     X_mean = mean([X_l; X_r]);
     Y_mean = mean([Y_l; Y_r]);
@@ -157,28 +182,34 @@ function [x, y, R, delL, theta, error] = CircleFitV2(X_l, X_r, Y_l, Y_r, w_l, w_
     %% Compute Fitting Error
     D_l = sqrt((X_l - x).^2 + (Y_l - y).^2);
     D_r = sqrt((X_r - x).^2 + (Y_r - y).^2);
-    error = struct();
-    error.full_l = D_l - (R - delL); % Naive Error
-    error.full_r = D_r - (R + delL);
-    error.max_l = max(error.full_l);
-    error.max_r = max(error.full_r);
-
+    err = struct();
+    
     % Non-Weighted Error Computation 
-    error.se_l = sum((error.full_l).^2);
-    error.mse_l = error.se_l / length(D_l);
-    error.rmse_l = sqrt(error.mse_l);
+    err.full_l = abs(D_l - (R - delL)); 
+    err.full_r = abs(D_r - (R + delL));
+    err.max_l = max(err.full_l);
+    err.max_r = max(err.full_r);
 
-    error.se_r = sum((error.full_r).^2);
-    error.mse_r = error.se_r / length(D_r);
-    error.rmse_r = sqrt(error.mse_r);
+    err.se_l = sum((err.full_l).^2);
+    err.mse_l = err.se_l / length(D_l);
+    err.rmse_l = sqrt(err.mse_l);
+
+    err.se_r = sum((err.full_r).^2);
+    err.mse_r = err.se_r / length(D_r);
+    err.rmse_r = sqrt(err.mse_r);
 
     % Weighted Error Computation
-    error.wse_l = sum((error.full_l).^2./w_l);
-    error.wmse_l = error.wse_l / length(D_l);
-    error.wrmse_l = sqrt(error.wmse_l);
+    err.wfull_l = err.full_l .* w_l.^(0.5);
+    err.wfull_r = err.full_r .* w_r.^(0.5);
+    err.wmax_l = max(err.wfull_l);
+    err.wmax_r = max(err.wfull_r);
 
-    error.wse_r = sum((error.full_r).^2./w_r);
-    error.wmse_r = error.wse_r / length(D_r);
-    error.wrmse_r = sqrt(error.wmse_r);
+    err.wse_l = sum((err.full_l).^2.*w_l);
+    err.wmse_l = err.wse_l / length(D_l);
+    err.wrmse_l = sqrt(err.wmse_l);
+
+    err.wse_r = sum((err.full_r).^2.*w_r);
+    err.wmse_r = err.wse_r / length(D_r);
+    err.wrmse_r = sqrt(err.wmse_r);
 
 end
