@@ -6,6 +6,6 @@ More information is written in the script "CircleFit.m"
 
 # CircleFitV2
 
-CircleFitV2 is a extened version of CircleFit, where we fit 2 parallel road lane by cocentric circles.
+CircleFitV2 is an extended version of CircleFit, where we fit 2 parallel road lane by cocentric circles.
 Unlike CircleFit, CircleFitV2 needs separate data points and weights for both lanes.
 More deeper analysis is done in CircleFitV2 for my personal research(Vehicle Lane Mapping)
