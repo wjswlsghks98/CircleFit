@@ -1,4 +1,4 @@
-function [x, y, R, delL, theta, err] = CircleFitV2(varargin)
+function [x, y, R, delL, res, err] = CircleFitV2(varargin)
 %% Circular Fitting for 2 Parallel Lanes
 % Upgraded version from CircleFit for 2 lanes
 % Since 2 lanes are parallel, they should share the same circle
@@ -22,7 +22,7 @@ function [x, y, R, delL, theta, err] = CircleFitV2(varargin)
 % R: radius of optimized circle, strictly positive
 % delL: lane spacing value for 2 lanes, may vary in sign depending on the
 % location of center point of the circle
-% theta: effective center circle angle
+% res: effective center circle angle + many more information
 % error: fitting error information    
     
     %% Register Variables
@@ -35,16 +35,15 @@ function [x, y, R, delL, theta, err] = CircleFitV2(varargin)
     plot_flag = varargin{7};
     init_flag = varargin{8};
 
-    if init_flag == true && length(varargin) > 8
+    if init_flag == true && nargin > 8
         error('To much input for initial arc segment fitting')
-    elseif init_flag == false && length(varargin) == 8
+    elseif init_flag == false && nargin == 8
         error('Not enough input for arc segment fitting')
     end
 
     if ~init_flag
-        lin_var = varargin{9}; 
-        m = lin_var(1); n = lin_var(2);
-        % m: slope, n: ordinate
+        init_points = varargin{9}; 
+        lp_l = init_points(:,1); lp_r = init_points(:,2);
     end
 
     %% Weighted Least Squares modeling for Circular Fitting
@@ -53,67 +52,120 @@ function [x, y, R, delL, theta, err] = CircleFitV2(varargin)
     Y_mean = mean([Y_l; Y_r]);
     X_l = X_l - X_mean; X_r = X_r - X_mean;
     Y_l = Y_l - Y_mean; Y_r = Y_r - Y_mean;
-
-    A = zeros(4,4);
-    b = zeros(4,1);
-
-    % Coefficient for "dQ/da = 0"
-    A(1,1) = sum(w_l.* X_l.^2) + sum(w_r.* X_r.^2);
-    A(1,2) = sum(w_l.* X_l.* Y_l) + sum(w_r.* X_r.* Y_r);
-    A(1,3) = sum(w_l.* X_l) + sum(w_r.* X_r);
-    A(1,4) = -sum(w_l.* X_l) + sum(w_r.* X_r);
-
-    % Coefficient for "dQ/db = 0"
-    A(2,1) = sum(w_l.* X_l.* Y_l) + sum(w_r.* X_r.* Y_r);
-    A(2,2) = sum(w_l.* Y_l.^2) + sum(w_r.* Y_r.^2);
-    A(2,3) = sum(w_l.* Y_l) + sum(w_r.* Y_r);
-    A(2,4) = -sum(w_l.* Y_l) + sum(w_r.* Y_r);
-
-    % Coefficient for "dQ/dC = 0"
-    A(3,1) = sum(w_l.* X_l) + sum(w_r.* X_r);
-    A(3,2) = sum(w_l.* Y_l) + sum(w_r.* Y_r);
-    A(3,3) = sum(w_l) + sum(w_r);
-    A(3,4) = -sum(w_l) + sum(w_r);
     
-    % Coefficient for "dQ/dD = 0"
-    A(4,1) = -sum(w_l.* X_l) + sum(w_r.* X_r);
-    A(4,2) = -sum(w_l.* Y_l) + sum(w_r.* Y_r);
-    A(4,3) = -sum(w_l) + sum(w_r);
-    A(4,4) = sum(w_l) + sum(w_r);
+    if init_flag
+        %% Initial Segment
+        A = zeros(4,4); b = zeros(4,1);
     
-    % b
-    b(1) = sum(w_l.* X_l.^3) + sum(w_l.* X_l.* Y_l.^2) + ...
-           sum(w_r.* X_r.^3) + sum(w_r.* X_r.* Y_r.^2);
-
-    b(2) = sum(w_l.* X_l.^2.* Y_l) + sum(w_l.* Y_l.^3) + ...
-           sum(w_r.* X_r.^2.* Y_r) + sum(w_r.* Y_r.^3);
-
-    b(3) = sum(w_l.* X_l.^2) + sum(w_l.* Y_l.^2) + ...
-           sum(w_r.* X_r.^2) + sum(w_r.* Y_r.^2);
-
-    b(4) = -sum(w_l.* X_l.^2) - sum(w_l.* Y_l.^2) + ...
-           sum(w_r.* X_r.^2) + sum(w_r.* Y_r.^2);
-
-    opt = A \ b;
-
-    x_rel = 1/2 * opt(1);
-    y_rel = 1/2 * opt(2);
-    C = opt(3); D = opt(4);
+        % Coefficient for "dQ/da = 0"
+        A(1,1) = sum(w_l.* X_l.^2) + sum(w_r.* X_r.^2);
+        A(1,2) = sum(w_l.* X_l.* Y_l) + sum(w_r.* X_r.* Y_r);
+        A(1,3) = sum(w_l.* X_l) + sum(w_r.* X_r);
+        A(1,4) = -sum(w_l.* X_l) + sum(w_r.* X_r);
     
-    % D > 0 ==> Circle is on the left lane region
-    % D < 0 ==> Circle is on the right lane region
-
-    RpdL = sqrt(x_rel^2 + y_rel^2 + C + D);
+        % Coefficient for "dQ/db = 0"
+        A(2,1) = sum(w_l.* X_l.* Y_l) + sum(w_r.* X_r.* Y_r);
+        A(2,2) = sum(w_l.* Y_l.^2) + sum(w_r.* Y_r.^2);
+        A(2,3) = sum(w_l.* Y_l) + sum(w_r.* Y_r);
+        A(2,4) = -sum(w_l.* Y_l) + sum(w_r.* Y_r);
     
-    x = x_rel + X_mean;
-    y = y_rel + Y_mean;
-
-    R = RpdL/2 + sqrt((RpdL/2)^2 - D/2);
-    delL = RpdL/2 - sqrt((RpdL/2)^2 - D/2);
+        % Coefficient for "dQ/dC = 0"
+        A(3,1) = sum(w_l.* X_l) + sum(w_r.* X_r);
+        A(3,2) = sum(w_l.* Y_l) + sum(w_r.* Y_r);
+        A(3,3) = sum(w_l) + sum(w_r);
+        A(3,4) = -sum(w_l) + sum(w_r);
+        
+        % Coefficient for "dQ/dD = 0"
+        A(4,1) = -sum(w_l.* X_l) + sum(w_r.* X_r);
+        A(4,2) = -sum(w_l.* Y_l) + sum(w_r.* Y_r);
+        A(4,3) = -sum(w_l) + sum(w_r);
+        A(4,4) = sum(w_l) + sum(w_r);
+        
+        % b
+        b(1) = sum(w_l.* X_l.^3) + sum(w_l.* X_l.* Y_l.^2) + ...
+               sum(w_r.* X_r.^3) + sum(w_r.* X_r.* Y_r.^2);
     
-    if ~isreal(RpdL)
-        warning('Incompatible results: adjust the sampling regions')
+        b(2) = sum(w_l.* X_l.^2.* Y_l) + sum(w_l.* Y_l.^3) + ...
+               sum(w_r.* X_r.^2.* Y_r) + sum(w_r.* Y_r.^3);
+    
+        b(3) = sum(w_l.* X_l.^2) + sum(w_l.* Y_l.^2) + ...
+               sum(w_r.* X_r.^2) + sum(w_r.* Y_r.^2);
+    
+        b(4) = -sum(w_l.* X_l.^2) - sum(w_l.* Y_l.^2) + ...
+               sum(w_r.* X_r.^2) + sum(w_r.* Y_r.^2);
+    
+        opt = A \ b;
+    
+        x_rel = 1/2 * opt(1);
+        y_rel = 1/2 * opt(2);
+        C = opt(3); D = opt(4);
+        
+        % D > 0 ==> Circle is on the left lane region
+        % D < 0 ==> Circle is on the right lane region
+    
+        RpdL = sqrt(x_rel^2 + y_rel^2 + C + D);
+        
+        x = x_rel + X_mean;
+        y = y_rel + Y_mean;
+    
+        R = RpdL/2 + sqrt((RpdL/2)^2 - D/2);
+        delL = RpdL/2 - sqrt((RpdL/2)^2 - D/2);
+        
+        if ~isreal(RpdL)
+            warning('Incompatible results: adjust the sampling regions')
+        end
+    else
+        %% Not Initial Segment
+        x1 = lp_l(1) - X_mean; x2 = lp_r(1) - X_mean;
+        y1 = lp_l(2) - Y_mean; y2 = lp_r(2) - Y_mean;
+        m = (y2 - y1)/(x2 - x1);
+        n = y1 - m * x1;
+
+        A = zeros(3,3); b = zeros(3,1);
+
+        % Coefficient for "dQ/da = 0"
+        A(1,1) = sum(w_l.* (X_l + m*Y_l).^2) + sum(w_r.* (X_r + m*Y_r).^2);
+        A(1,2) = sum(w_l.* (X_l + m*Y_l)) + sum(w_r.* (X_r + m*Y_r));
+        A(1,3) = -sum(w_l.* (X_l + m*Y_l)) + sum(w_r.* (X_r + m*Y_r));
+
+        % Coefficient for "dQ/dC = 0"
+        A(2,1) = sum(w_l.* (X_l + m*Y_l)) + sum(w_r.* (X_r + m*Y_r));
+        A(2,2) = sum(w_l) + sum(w_r);
+        A(2,3) = -sum(w_l) + sum(w_r);
+
+        % Coefficient for "dQ/dD = 0"
+        A(3,1) = -sum(w_l.* (X_l + m*Y_l)) + sum(w_r.* (X_r + m*Y_r));
+        A(3,2) = -sum(w_l) + sum(w_r);
+        A(3,3) = sum(w_l) + sum(w_r);
+
+        % b
+        b(1) = sum(w_l.* (X_l + m*Y_l).* (X_l.^2 + Y_l.^2 - 2*n*Y_l)) + ...
+               sum(w_r.* (X_r + m*Y_r).* (X_r.^2 + Y_r.^2 - 2*n*Y_r));
+        
+        b(2) = sum(w_l.* (X_l.^2 + Y_l.^2 - 2*n*Y_l)) + ...
+               sum(w_r.* (X_r.^2 + Y_r.^2 - 2*n*Y_r));
+
+        b(3) = -sum(w_l.* (X_l.^2 + Y_l.^2 - 2*n*Y_l)) + ...
+               sum(w_r.* (X_r.^2 + Y_r.^2 - 2*n*Y_r));
+
+        opt = A \ b;
+        x_rel = 1/2 * opt(1);
+        y_rel = m * x_rel + n;
+        C = opt(2); D = opt(3);
+
+        RpdL = sqrt(x_rel^2 + y_rel^2 + C + D);
+        
+        x = x_rel + X_mean;
+        y = y_rel + Y_mean;
+    
+        R = RpdL/2 + sqrt((RpdL/2)^2 - D/2);
+        delL = RpdL/2 - sqrt((RpdL/2)^2 - D/2);
+        
+        if ~isreal(RpdL)
+            warning('Incompatible results: adjust the sampling regions')
+        end
     end
+
 
     X_l = X_l + X_mean; X_r = X_r + X_mean;
     Y_l = Y_l + Y_mean; Y_r = Y_r + Y_mean;
@@ -152,12 +204,30 @@ function [x, y, R, delL, theta, err] = CircleFitV2(varargin)
         th_list_r(i) = th(idx_r);
     end
     
-    theta = struct();
-    theta.lb = min([th_list_l th_list_r]); theta.ub = max([th_list_l th_list_r]);
-    theta.ang = theta.ub - theta.lb; 
+    res = struct();
+    res.th_lb = min([th_list_l th_list_r]); res.th_ub = max([th_list_l th_list_r]);
+    res.ang = res.th_ub - res.th_lb; 
 
-    th_lbidx = find(th == theta.lb);
-    th_ubidx = find(th == theta.ub);
+    th_lbidx = find(th == res.th_lb);
+    th_ubidx = find(th == res.th_ub);
+    
+    % Find the last point
+    cnt_pointL_1 = [xf1(th_lbidx); yf1(th_lbidx)];
+    cnt_pointL_2 = [xf1(th_ubidx); yf1(th_ubidx)];
+
+    cnt_pointR_1 = [xf2(th_lbidx); yf2(th_lbidx)];
+    cnt_pointR_2 = [xf2(th_ubidx); yf2(th_ubidx)];
+
+    d1 = (X_l(end) - cnt_pointL_1(1))^2 + (Y_l(end) - cnt_pointL_1(2))^2;
+    d2 = (X_l(end) - cnt_pointL_2(1))^2 + (Y_l(end) - cnt_pointL_2(2))^2;
+    
+    if d1 > d2
+        res.last_pointL = cnt_pointL_2;
+        res.last_pointR = cnt_pointR_2;
+    else
+        res.last_pointL = cnt_pointL_1;
+        res.last_pointR = cnt_pointR_1;
+    end
 
     %% Plot Results
     if plot_flag
