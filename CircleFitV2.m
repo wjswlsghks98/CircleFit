@@ -4,7 +4,8 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
 % Since 2 lanes are parallel, they should share the same circle
 % Implemented by JinHwan Jeon, 2022
 
-% [x, y, R, delL, error] = CircleFit(X_l, X_r, Y_l, Y_r, w_l, w_r, plot_flag, init_flag, (lin_var: optional))
+% [x, y, R, delL, error] = ...
+% CircleFit(X_l, X_r, Y_l, Y_r, w_l, w_r, plot_flag, init_flag, (lin_var, prev_D, init_theta: optional))
 % 
 % Returns best fit circle given 2D data points and corresponding weights
 
@@ -58,7 +59,7 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
     Y_l = Y_l - Y_mean; Y_r = Y_r - Y_mean;
     
     if init_flag
-        %% Initial Segment
+       %% Initial Segment
         A = zeros(4,4); b = zeros(4,1);
     
         % Coefficient for "dQ/da = 0"
@@ -119,7 +120,7 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
             warning('Incompatible results: adjust the sampling regions')
         end
     else
-        %% Not Initial Segment
+       %% Not Initial Segment
         x1 = lp_l(1) - X_mean; x2 = lp_r(1) - X_mean;
         y1 = lp_l(2) - Y_mean; y2 = lp_r(2) - Y_mean;
         m = (y2 - y1)/(x2 - x1);
