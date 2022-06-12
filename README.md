@@ -10,7 +10,7 @@ CircleFitV2 is an extended version of CircleFit, where we fit 2 parallel road la
 Unlike CircleFit, CircleFitV2 needs separate data points and weights for both lanes.
 More deeper analysis is done in CircleFitV2 for my personal research(Vehicle Lane Mapping)
 
-> Detailed explanation will be provided in paperwork later(TBD)
+> Detailed explanation will be provided in paperwork later(To be done!)
 
 > Optimization Framework will also be implemented for merging discontinuous, but consecutive "parametrized" lane segments: Simple Non-Linear Optimization needed
 
