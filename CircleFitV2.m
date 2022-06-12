@@ -42,7 +42,11 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
     end
 
     if ~init_flag
-        init_points = varargin{9}; 
+        init_points = varargin{9}; % Last Point information for previous segment
+        prev_D = varargin{10}; % Previous Segment segment parameter D
+        init_theta = varargin{11};
+        % Used for determining current segment's lower/upper bound angle
+        
         lp_l = init_points(:,1); lp_r = init_points(:,2);
     end
 
@@ -166,7 +170,6 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
         end
     end
 
-
     X_l = X_l + X_mean; X_r = X_r + X_mean;
     Y_l = Y_l + Y_mean; Y_r = Y_r + Y_mean;
     
@@ -205,9 +208,14 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
     end
     
     res = struct();
-    res.th_lb = min([th_list_l th_list_r]); res.th_ub = max([th_list_l th_list_r]);
+    res.D = D;
+    % Approximated angle boundary calculation
+    % If not initial segment, angle value for the intial data points will
+    % be updated below
+    res.th_lb = min([th_list_l th_list_r]); 
+    res.th_ub = max([th_list_l th_list_r]);
     res.ang = res.th_ub - res.th_lb; 
-
+    
     th_lbidx = find(th == res.th_lb);
     th_ubidx = find(th == res.th_ub);
     
@@ -224,24 +232,61 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
     if d1 > d2
         res.last_pointL = cnt_pointL_2;
         res.last_pointR = cnt_pointR_2;
+        
+        res.next_theta = th(th_ubidx);
+        
+        % th(th_lbidx) is the initial point angle
+        % res.th_lb should be changed if not initial segment
+        
+        if ~init_flag
+            if D * prev_D > 0
+                res.th_lb = init_theta;
+            else
+                res.th_lb = angleAdd(init_theta, pi);
+            end
+            res.ang = res.th_ub - res.th_lb;
+        end
+          
     else
         res.last_pointL = cnt_pointL_1;
         res.last_pointR = cnt_pointR_1;
+        
+        res.next_theta = th(th_lbidx);
+        
+        % th(th_ubidx) is the initial point angle
+        % res.th_ub should be changed if not initial segment
+        
+        if ~init_flag
+            if D * prev_D > 0
+                res.th_ub = init_theta;
+            else
+                res.th_ub = angleAdd(init_theta, pi);
+            end
+            res.ang = res.th_ub - res.th_lb;
+        end
     end
+    
+    new_th = linspace(res.th_lb, res.th_ub, 1e4);
+    
+    xf1 = (R - delL) * cos(new_th) + x;
+    yf1 = (R - delL) * sin(new_th) + y;
 
+    xf2 = (R + delL) * cos(new_th) + x;
+    yf2 = (R + delL) * sin(new_th) + y;
+    
     %% Plot Results
     if plot_flag
         figure(1);
         p_data_l = plot(X_l, Y_l, 'r.'); hold on; grid on; axis equal; 
         p_data_r = plot(X_r, Y_r, 'g.');
 
-        p_fit = plot(xf1(th_lbidx:th_ubidx),yf1(th_lbidx:th_ubidx), 'k--');
-        p_cont = plot(xf1(th_lbidx),yf1(th_lbidx), 'bp');
-        plot(xf1(th_ubidx),yf1(th_ubidx), 'bp');
+        p_fit = plot(xf1,yf1, 'k--');
+        p_cont = plot(xf1(1),yf1(1), 'bp');
+        plot(xf1(end),yf1(end), 'bp');
 
-        plot(xf2(th_lbidx:th_ubidx),yf2(th_lbidx:th_ubidx),'k--');
-        plot(xf2(th_lbidx),yf2(th_lbidx), 'bp');
-        plot(xf2(th_ubidx),yf2(th_ubidx), 'bp');
+        plot(xf2,yf2,'k--');
+        plot(xf2(1),yf2(1), 'bp');
+        plot(xf2(end),yf2(end), 'bp');
 
         xlabel('X'); ylabel('Y'); title('Circular Fitting');
         legend([p_data_l, p_data_r, p_fit, p_cont],...
@@ -282,4 +327,10 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
     err.wmse_r = err.wse_r / length(D_r);
     err.wrmse_r = sqrt(err.wmse_r);
 
+end
+
+function sum = angleAdd(th1, th2)
+    % Angle addition 
+    n = floor((th1+th2)/(2*pi));
+    sum = th1 + th2 - 2 * n * pi;
 end
