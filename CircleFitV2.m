@@ -1,4 +1,4 @@
-function [x, y, R, delL, res, err] = CircleFitV2(varargin)
+function [res, err] = CircleFitV2(varargin)
 %% Circular Fitting for 2 Parallel Lanes
 % Upgraded version from CircleFit for 2 lanes
 % Since 2 lanes are parallel, they should share the same circle
@@ -15,7 +15,9 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
 % w_l, w_r: weighting factor for particular point (left and right lanes)
 % plot_flag: boolean for plotting fit results
 % init_flag: boolean for indicating current segment is intial or not
-% lin_var: if not initial, perform constrained Least Squares using lin_var
+% lin_var: if not initial segment, perform constrained Least Squares using lin_var
+% prev_D: if not initial segment, refer to the previous optimization parameter D for determining the angle boundary for current segment
+% init_theta: if not initial segment, refer to the previous segment's final angle
 
 %% Output
 % x: x coordinate of optimized circle's center point
@@ -209,6 +211,7 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
     end
     
     res = struct();
+    res.x = x; res.y = y; res.R = R; res.delL = delL;
     res.D = D;
     % Approximated angle boundary calculation
     % If not initial segment, angle value for the intial data points will
@@ -246,6 +249,18 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
                 res.th_lb = angleAdd(init_theta, pi);
             end
             res.ang = res.th_ub - res.th_lb;
+            x_l = (R - delL) * cos(res.th_lb) + x;
+            y_l = (R - delL) * sin(res.th_lb) + y;
+
+            x_r = (R + delL) * cos(res.th_lb) + x;
+            y_r = (R + delL) * sin(res.th_lb) + y;
+            
+            res.init_pointL = [x_l; y_l];
+            res.init_pointR = [x_r; y_r];
+            
+        else
+            res.init_pointL = cnt_pointL_1;
+            res.init_pointR = cnt_pointR_1;
         end
           
     else
@@ -264,6 +279,17 @@ function [x, y, R, delL, res, err] = CircleFitV2(varargin)
                 res.th_ub = angleAdd(init_theta, pi);
             end
             res.ang = res.th_ub - res.th_lb;
+            x_l = (R - delL) * cos(res.th_ub) + x;
+            y_l = (R - delL) * sin(res.th_ub) + y;
+
+            x_r = (R + delL) * cos(res.th_ub) + x;
+            y_r = (R + delL) * sin(res.th_ub) + y;
+            
+            res.init_pointL = [x_l; y_l];
+            res.init_pointR = [x_r; y_r];
+        else
+            res.init_pointL = cnt_pointL_2;
+            res.init_pointR = cnt_pointR_2;
         end
     end
     
