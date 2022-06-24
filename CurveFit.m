@@ -101,15 +101,16 @@ classdef CurveFit < handle
         end
 
         %% Part2: Optimize
-        function obj = optimize(obj)
+        
+        %% Phase 1: Find and parametrize straight lines
+        function obj = optimizePh1(obj)
             obj.opt.line_segments = {};
             obj.opt.arc_segments = {};
 
-            % Phase 1: Find and parametrize straight lines 
+             
             disp('-Phase 1: Identifying and Parametrization of Straight Lane Segments')
             thres = 1e-4;
 %             acc_p = 0.1;
-            acc_thres = 10*1e-2;
             n = length(obj.opt.kappas);
             obj.opt.st_intvs = [];
 
@@ -130,15 +131,13 @@ classdef CurveFit < handle
             LP_l = obj.Optimizer.opt.reordered_lml_pc(1:2,:);
             LP_r = obj.Optimizer.opt.reordered_lmr_pc(1:2,:);
             
-%             w_l = obj.Optimizer.opt.w_l;
-%             w_r = obj.Optimizer.opt.w_r;
-            w_l = ones(1,size(LP_l,2));
-            w_r = w_l;
+            w_l = obj.Optimizer.opt.w_l;
+            w_r = obj.Optimizer.opt.w_r;
             
-            figure(2);
-            obj.plot_num = obj.plot_num+1;
-            plot(LP_l(1,:),LP_l(2,:),'r.'); hold on; grid on; axis equal;
-            plot(LP_r(1,:),LP_r(2,:),'g.');
+%             figure(2);
+%             obj.plot_num = obj.plot_num+1;
+%             plot(LP_l(1,:),LP_l(2,:),'r.'); hold on; grid on; axis equal;
+%             plot(LP_r(1,:),LP_r(2,:),'g.');
 %             
 
             for i=1:n
@@ -152,21 +151,176 @@ classdef CurveFit < handle
 
                 disp(['Line Segment ID: ', num2str(i),', Segment Index: ',num2str(lb),' ~ ',num2str(ub)])
                 [res, err] = LineFitV2(X_l,X_r,Y_l,Y_r,...
-                                                       w_l(lb:ub),w_r(lb:ub),true);
+                                       w_l(lb:ub),w_r(lb:ub),false);
                 seg = struct();
                 seg.res = res;
                 seg.err = err;
+                seg.status = 'line';
                 seg.bnds = [lb, ub];
                 obj.opt.line_segments = [obj.opt.line_segments {seg}];
+                obj.opt.st_intvs(i,:) = seg.bnds;
             end
+        end
+        %%  Phase 2: Fill in remaining parts with circular arcs
+        function obj = optimizePh2(obj)
             
-            % Phase 2: Fill in remaining parts with circular arcs
+            LP_l = obj.Optimizer.opt.reordered_lml_pc(1:2,:);
+            LP_r = obj.Optimizer.opt.reordered_lmr_pc(1:2,:);
+            
+            w_l = obj.Optimizer.opt.w_l;
+            w_r = obj.Optimizer.opt.w_r;
+
             disp('-Phase 2: Filling in Remaining Parts with Circular Arcs')
             
+            n = size(obj.opt.st_intvs,1);
+            obj.opt.arc_intvs = zeros(n+1,2);
+            obj.opt.arc_intvs(1,1) = 1;
+            obj.opt.arc_intvs(1,2) = obj.opt.st_intvs(1,1)-1;
+
+            for i=1:n-1
+                obj.opt.arc_intvs(i+1,1) = obj.opt.st_intvs(i,2)+1;
+                obj.opt.arc_intvs(i+1,2) = obj.opt.st_intvs(i+1,1)-1;
+            end
+
+            obj.opt.arc_intvs(end,1) = obj.opt.st_intvs(end,2)+1;
+            obj.opt.arc_intvs(end,2) = size(obj.Optimizer.opt.reordered_lml_pc,2);
             
+            % One-way optimization for first and last segments
+            disp('-Arc Approximation for first segment-')
+            
+            lb = obj.opt.arc_intvs(1,2)-300;
+            ub = obj.opt.arc_intvs(1,2)-1;
+            seg = obj.opt.line_segments{1};
+            
+            fixed_status = 'Back';
+            adjacent_seg_type = 'line';
+            fixed_points = [seg.res.init_pointL seg.res.init_pointR];
+            prev_D = 0;
+            th = seg.res.theta;
+
+            while true
+                disp(['Current Lower Bound: ',num2str(lb)])
+                X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+                X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+                W_l = w_l(lb:ub); W_r = w_r(lb:ub);
+
+                [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
+                                         false,fixed_status,adjacent_seg_type,...
+                                         fixed_points,prev_D,th);
+
+                err_tot = [err.full_l err.full_r];
+                
+                if length(find(err_tot >= 10*1e-2)) >= 3
+                    disp('-Threshold for arc approximation exceeded')
+                    disp(['-Segment: Idx ',num2str(lb+1),' ~ ',num2str(ub)])
+
+                    seg = struct();
+                    seg.res = prev_res;
+                    seg.err = prev_err;
+                    seg.status = 'init'; % Marking initial segment approximation
+                    seg.bnds = [lb+1 ub];
+
+                    obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
+
+                    adjacent_seg_type = 'arc';
+                    fixed_points = [prev_res.init_pointL prev_res.init_pointR];
+                    prev_D = prev_res.D;
+                    th = prev_res.th_init;
+                    
+                    ub = lb;
+                    lb = lb - 300;
+
+                    if lb <= 0
+                        disp('Arc Approximation for first segment finished')
+                        lb = 1;
+                        X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+                        X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+                        W_l = w_l(lb:ub); W_r = w_r(lb:ub);
+
+                        [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
+                                               false,fixed_status,adjacent_seg_type,...
+                                               fixed_points,prev_D,th);
+                        seg = struct();
+                        seg.res = res;
+                        seg.err = err;
+                        seg.status = 'init';
+                        seg.bnds = [1 ub];
+                        
+                        obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
+                        break;
+                    end
+                else
+                    prev_res = res;
+                    prev_err = err;
+                    lb = lb-1;
+                    
+                    if lb == 0
+                        disp('Arc Approximation for first segment finished')
+                        obj.opt.arc_segments = [{prev_res} obj.opt.arc_segments];
+                        break;
+                    end
+                end
+            end
+
+            disp('-Arc Approximation for last segment-')
+            % Two-way optimization for segments in between
+            disp('-Arc Approximation for remaining segment-')
+
             
         end
 
+        %% Phase 3: Shift Segments to match lateral position (Optimization)
+        function obj = optimizePh3(obj)
+        end
+
+        function plotRes(obj)
+            line_segs = obj.opt.line_segments;
+            arc_segs = obj.opt.arc_segments;
+            
+            LP_l = obj.Optimizer.opt.reordered_lml_pc(1:2,:);
+            LP_r = obj.Optimizer.opt.reordered_lmr_pc(1:2,:);
+
+            % Plot Line Segments 
+            figure(2); hold on; axis equal; grid on;
+            plot(LP_l(1,:),LP_l(2,:),'r.');
+            plot(LP_r(1,:),LP_r(2,:),'g.');
+
+            n = length(line_segs);
+            for i=1:n
+                seg = line_segs{i};
+                left_lane = [seg.res.init_pointL seg.res.last_pointL];
+                right_lane = [seg.res.init_pointR seg.res.last_pointR];
+              
+                plot(left_lane(1,:),left_lane(2,:),'k--')
+                plot(right_lane(1,:),right_lane(2,:),'k--')
+                plot(left_lane(1,:),left_lane(2,:),'bp')
+                plot(right_lane(1,:),right_lane(2,:),'bp')
+            end
+
+            % Plot Arc Segments
+            n = length(arc_segs);
+            for i=1:n
+                seg = arc_segs{i};
+                ths = linspace(seg.res.th_init, seg.res.th_last, 1e4);
+                
+                R = seg.res.R; delL = seg.res.delL;
+                x = seg.res.x; y = seg.res.y;
+
+                xf1 = (R - delL) * cos(ths) + x;
+                yf1 = (R - delL) * sin(ths) + y;
+            
+                xf2 = (R + delL) * cos(ths) + x;
+                yf2 = (R + delL) * sin(ths) + y;
+                
+                left_lane = [seg.res.init_pointL seg.res.last_pointL];
+                right_lane = [seg.res.init_pointR seg.res.last_pointR];
+
+                plot(xf1,yf1,'k--');
+                plot(xf2,yf2,'k--');
+                plot(left_lane(1,:),left_lane(2,:),'bp')
+                plot(right_lane(1,:),right_lane(2,:),'bp')
+            end
+        end
         
 
     end
@@ -239,10 +393,10 @@ function [lb, ub] = findBestIntv(LP_l,LP_r,w_l,w_r,x0)
         Y_l = LP_l(2,lb_:ub_);
         X_r = LP_r(1,lb_:ub_);
         Y_r = LP_r(2,lb_:ub_);
-        [res,err] = LineFitV2(X_l,X_r,Y_l,Y_r,...
+        [~,err] = LineFitV2(X_l,X_r,Y_l,Y_r,...
                               w_l(lb_:ub_), w_r(lb_:ub_),false);
 
-        f.Fval = 1/(res.L)^(3.6) * err.tot;
+        f.Fval = 1/(ub_ - lb_ + 1)^(3.4) * err.tot;
     end
     
 end
