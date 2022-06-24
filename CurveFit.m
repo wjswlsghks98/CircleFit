@@ -161,7 +161,8 @@ classdef CurveFit < handle
                 obj.opt.st_intvs(i,:) = seg.bnds;
             end
         end
-        %%  Phase 2: Fill in remaining parts with circular arcs
+
+        %% Phase 2: Fill in remaining parts with circular arcs
         function obj = optimizePh2(obj)
             
             LP_l = obj.Optimizer.opt.reordered_lml_pc(1:2,:);
@@ -185,7 +186,7 @@ classdef CurveFit < handle
             obj.opt.arc_intvs(end,1) = obj.opt.st_intvs(end,2)+1;
             obj.opt.arc_intvs(end,2) = size(obj.Optimizer.opt.reordered_lml_pc,2);
             
-            % One-way optimization for first and last segments
+            %% One-way optimization for first and last segments
             disp('-Arc Approximation for first segment-')
             
             lb = obj.opt.arc_intvs(1,2)-300;
@@ -199,7 +200,7 @@ classdef CurveFit < handle
             th = seg.res.theta;
 
             while true
-                disp(['Current Lower Bound: ',num2str(lb)])
+%                 disp(['Current Lower Bound: ',num2str(lb)])
                 X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
                 X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
                 W_l = w_l(lb:ub); W_r = w_r(lb:ub);
@@ -263,7 +264,83 @@ classdef CurveFit < handle
             end
 
             disp('-Arc Approximation for last segment-')
-            % Two-way optimization for segments in between
+            lb = obj.opt.arc_intvs(end,2)+1;
+            ub = obj.opt.arc_intvs(end,2)+300;
+            n = size(obj.Optimizer.reordered_lml_pc,2);
+            seg = obj.opt.line_segments{end};
+            
+            fixed_status = 'Front';
+            adjacent_seg_type = 'line';
+            fixed_points = [seg.res.last_pointL seg.res.last_pointR];
+            prev_D = 0;
+            th = seg.res.theta;
+        
+            while true
+%                 disp(['Current Lower Bound: ',num2str(lb)])
+                X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+                X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+                W_l = w_l(lb:ub); W_r = w_r(lb:ub);
+
+                [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
+                                         false,fixed_status,adjacent_seg_type,...
+                                         fixed_points,prev_D,th);
+
+                err_tot = [err.full_l err.full_r];
+                
+                if length(find(err_tot >= 10*1e-2)) >= 3
+                    disp('-Threshold for arc approximation exceeded')
+                    disp(['-Segment: Idx ',num2str(lb),' ~ ',num2str(ub-1)])
+
+                    seg = struct();
+                    seg.res = prev_res;
+                    seg.err = prev_err;
+                    seg.status = 'last'; % Marking initial segment approximation
+                    seg.bnds = [lb ub-1];
+
+                    obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
+
+                    adjacent_seg_type = 'arc';
+                    fixed_points = [prev_res.init_pointL prev_res.init_pointR];
+                    prev_D = prev_res.D;
+                    th = prev_res.th_init;
+                    
+                    lb = ub;
+                    ub = lb + 300;
+
+                    if ub > n
+                        disp('Arc Approximation for last segment finished')
+                        lb = 1;
+                        X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+                        X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+                        W_l = w_l(lb:ub); W_r = w_r(lb:ub);
+
+                        [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
+                                               false,fixed_status,adjacent_seg_type,...
+                                               fixed_points,prev_D,th);
+                        seg = struct();
+                        seg.res = res;
+                        seg.err = err;
+                        seg.status = 'last';
+                        seg.bnds = [lb n];
+                        
+                        obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
+                        break;
+                    end
+                else
+                    prev_res = res;
+                    prev_err = err;
+                    ub = ub+1;
+                    
+                    if ub > n
+                        disp('Arc Approximation for first segment finished')
+                        obj.opt.arc_segments = [{prev_res} obj.opt.arc_segments];
+                        break;
+                    end
+                end
+            end
+
+
+            %% Two-way optimization for segments in between
             disp('-Arc Approximation for remaining segment-')
 
             
