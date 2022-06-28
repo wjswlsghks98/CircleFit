@@ -11,7 +11,7 @@ classdef CurveFit < handle
             obj.Optimizer = Optimizer;
         end
         
-        %% Part 1: Curvature Segmentation using Dynamic Programming
+        %% Part 1(Previous): Curvature Segmentation using Dynamic Programming
         function obj = curvseg(obj, plot_flag)
             LP_l = reshape(obj.Optimizer.opt.lml(:,1),2,[]);
             n = size(LP_l,2);
@@ -102,8 +102,8 @@ classdef CurveFit < handle
 
         %% Part2: Optimize
         
-        %% Phase 1: Find and parametrize straight lines
-        function obj = optimizePh1(obj)
+        %% Phase 1(Previous): Find and parametrize straight lines
+        function obj = optimizePh1_1(obj)
             obj.opt.line_segments = {};
             obj.opt.arc_segments = {};
 
@@ -162,6 +162,88 @@ classdef CurveFit < handle
             end
         end
 
+        %% Phase 1(Modified): Find and parametrize straight lines
+        function obj = optimizePh1(obj)
+            % Instead of performing Dynamic programming, naively search for
+            % straight line segments
+            LP_l = obj.Optimizer.opt.reordered_lml_pc(1:2,:);
+            LP_r = obj.Optimizer.opt.reordered_lmr_pc(1:2,:);
+            
+            W_l = obj.Optimizer.opt.w_l;
+            W_r = obj.Optimizer.opt.w_r;
+
+            base_thres = 1000;
+            lb = 1;
+            
+            plot_flag = false;
+            
+            obj.opt.line_seg_length = zeros(1,size(LP_l,2)-base_thres);
+            obj.opt.line_intvs = [];
+
+            while lb <= size(LP_l,2) - base_thres
+                
+                err_max = 0;
+                ub = lb + base_thres;
+
+                while err_max < 0.05
+                    X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+                    X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+                    w_l = W_l(lb:ub); w_r = W_r(lb:ub);
+                    [~,err] = LineFitV2(X_l, X_r, Y_l, Y_r, w_l, w_r, plot_flag);
+                    err_max = max([err.max_l err.max_r]);
+                    
+                    ub = ub + 1;
+                end
+                if (ub-1) - lb == base_thres
+                    obj.opt.line_seg_length(lb) = 0;
+                    if lb ~= 1 && obj.opt.line_seg_length(lb-1) ~= 0
+                        obj.opt.line_intvs(end,2) = lb-1;
+                    end
+                else
+                    obj.opt.line_seg_length(lb) = (ub-1) - lb;
+                    if obj.opt.line_seg_length(lb-1) == 0
+                        obj.opt.line_intvs = [obj.opt.line_intvs; [lb 0]];
+                    end
+                    disp(['Lower Bound Idx: ',num2str(lb), ' Maximum Segment Length: ',num2str((ub-1) - lb)])
+                end
+                
+                lb = lb + 1;
+            end
+            
+            % From the maximum length segment, downward search
+            max_L = max(obj.opt.line_seg_length);
+            obj.opt.line_segments = {};
+            cnt = 1;
+
+            while max_L > 0
+                lb = find(obj.opt.line_seg_length == max_L);
+                ub = idx + obj.opt.line_seg_length(lb);
+
+                if obj.opt.line_seg_length(ub) == -1
+                    while obj.opt.line_seg_length(ub) == -1
+                        ub = ub - 1;
+                    end
+                end
+                X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+                X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+                w_l = W_l(lb:ub); w_r = W_r(lb:ub);
+                [res,err] = LineFitV2(X_l, X_r, Y_l, Y_r, w_l, w_r, plot_flag);
+
+                res.status = 'line';
+                obj.opt.line_segments = [obj.opt.line_segments {res}];
+                disp(['Line Segment ', num2str(cnt),': Idx ',num2str(lb),' ~ ', num2str(ub)])
+                disp(['Max Error: ', max([err.max_l err.max_r]), 'RMSE Error: ', num2str(err.rmse) ])
+                disp('----------------------------------------------')
+                
+                obj.opt.line_seg_length(lb-500:ub) = -1;
+                max_L = max(obj.opt.line_seg_length);
+                cnt = cnt + 1;
+
+            end
+
+            
+        end
+
         %% Phase 2: Fill in remaining parts with circular arcs
         function obj = optimizePh2(obj)
             
@@ -189,8 +271,6 @@ classdef CurveFit < handle
             %% One-way optimization for first and last segments
             disp('-Arc Approximation for first segment-')
             
-            lb = obj.opt.arc_intvs(1,2)-300;
-            ub = obj.opt.arc_intvs(1,2)-1;
             seg = obj.opt.line_segments{1};
             
             fixed_status = 'Back';
@@ -198,146 +278,113 @@ classdef CurveFit < handle
             fixed_points = [seg.res.init_pointL seg.res.init_pointR];
             prev_D = 0;
             th = seg.res.theta;
+            bnds = obj.opt.arc_intvs(1,:);
 
             while true
 %                 disp(['Current Lower Bound: ',num2str(lb)])
-                X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
-                X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
-                W_l = w_l(lb:ub); W_r = w_r(lb:ub);
-
-                [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
-                                         false,fixed_status,adjacent_seg_type,...
-                                         fixed_points,prev_D,th);
-
-                err_tot = [err.full_l err.full_r];
+                [res,err,lb] = findBestBnd(LP_l,LP_r,w_l,w_r,...
+                                           fixed_status,adjacent_seg_type,...
+                                           fixed_points,prev_D,th,bnds);
                 
-                if length(find(err_tot >= 10*1e-2)) >= 3
-                    disp('-Threshold for arc approximation exceeded')
-                    disp(['-Segment: Idx ',num2str(lb+1),' ~ ',num2str(ub)])
+                disp(['-Optimized Indices: ',num2str(lb),' ~ ',num2str(bnds(2))])
+                disp(['-Maximum Error: ',num2str(max([err.max_l, err.max_r])),'m'])
+                disp(['-RMSE Error: ',num2str(err.rmse),'m'])
 
-                    seg = struct();
-                    seg.res = prev_res;
-                    seg.err = prev_err;
-                    seg.status = 'init'; % Marking initial segment approximation
-                    seg.bnds = [lb+1 ub];
+                seg = struct();
+                seg.res = res;
+                seg.err = err;
+                seg.status = 'init'; % Marking initial segment approximation
+                seg.bnds = bnds;
+    
+                obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
 
-                    obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
-
-                    adjacent_seg_type = 'arc';
-                    fixed_points = [prev_res.init_pointL prev_res.init_pointR];
-                    prev_D = prev_res.D;
-                    th = prev_res.th_init;
-                    
-                    ub = lb;
-                    lb = lb - 300;
-
-                    if lb <= 0
-                        disp('Arc Approximation for first segment finished')
-                        lb = 1;
-                        X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
-                        X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
-                        W_l = w_l(lb:ub); W_r = w_r(lb:ub);
-
-                        [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
-                                               false,fixed_status,adjacent_seg_type,...
-                                               fixed_points,prev_D,th);
-                        seg = struct();
-                        seg.res = res;
-                        seg.err = err;
-                        seg.status = 'init';
-                        seg.bnds = [1 ub];
-                        
-                        obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
-                        break;
-                    end
+                if lb == obj.opt.arc_intvs(1,1)
+                    break;
                 else
-                    prev_res = res;
-                    prev_err = err;
-                    lb = lb-1;
-                    
-                    if lb == 0
-                        disp('Arc Approximation for first segment finished')
-                        obj.opt.arc_segments = [{prev_res} obj.opt.arc_segments];
-                        break;
-                    end
+                    adjacent_seg_type = 'arc';
+                    fixed_points = [res.init_pointL res.init_pointR];
+                    prev_D = res.D;
+                    th = res.th_init;
+                    bnds = [obj.opt.arc_intvs(1,1) lb-1];
                 end
+                
             end
 
-            disp('-Arc Approximation for last segment-')
-            lb = obj.opt.arc_intvs(end,2)+1;
-            ub = obj.opt.arc_intvs(end,2)+300;
-            n = size(obj.Optimizer.reordered_lml_pc,2);
-            seg = obj.opt.line_segments{end};
-            
-            fixed_status = 'Front';
-            adjacent_seg_type = 'line';
-            fixed_points = [seg.res.last_pointL seg.res.last_pointR];
-            prev_D = 0;
-            th = seg.res.theta;
-        
-            while true
-%                 disp(['Current Lower Bound: ',num2str(lb)])
-                X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
-                X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
-                W_l = w_l(lb:ub); W_r = w_r(lb:ub);
-
-                [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
-                                         false,fixed_status,adjacent_seg_type,...
-                                         fixed_points,prev_D,th);
-
-                err_tot = [err.full_l err.full_r];
-                
-                if length(find(err_tot >= 10*1e-2)) >= 3
-                    disp('-Threshold for arc approximation exceeded')
-                    disp(['-Segment: Idx ',num2str(lb),' ~ ',num2str(ub-1)])
-
-                    seg = struct();
-                    seg.res = prev_res;
-                    seg.err = prev_err;
-                    seg.status = 'last'; % Marking initial segment approximation
-                    seg.bnds = [lb ub-1];
-
-                    obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
-
-                    adjacent_seg_type = 'arc';
-                    fixed_points = [prev_res.init_pointL prev_res.init_pointR];
-                    prev_D = prev_res.D;
-                    th = prev_res.th_init;
-                    
-                    lb = ub;
-                    ub = lb + 300;
-
-                    if ub > n
-                        disp('Arc Approximation for last segment finished')
-                        lb = 1;
-                        X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
-                        X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
-                        W_l = w_l(lb:ub); W_r = w_r(lb:ub);
-
-                        [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
-                                               false,fixed_status,adjacent_seg_type,...
-                                               fixed_points,prev_D,th);
-                        seg = struct();
-                        seg.res = res;
-                        seg.err = err;
-                        seg.status = 'last';
-                        seg.bnds = [lb n];
-                        
-                        obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
-                        break;
-                    end
-                else
-                    prev_res = res;
-                    prev_err = err;
-                    ub = ub+1;
-                    
-                    if ub > n
-                        disp('Arc Approximation for first segment finished')
-                        obj.opt.arc_segments = [{prev_res} obj.opt.arc_segments];
-                        break;
-                    end
-                end
-            end
+%             disp('-Arc Approximation for last segment-')
+%             lb = obj.opt.arc_intvs(end,1)+1;
+%             ub = obj.opt.arc_intvs(end,1)+300;
+%             n = size(obj.Optimizer.opt.reordered_lml_pc,2);
+%             seg = obj.opt.line_segments{end};
+%             
+%             fixed_status = 'Front';
+%             adjacent_seg_type = 'line';
+%             fixed_points = [seg.res.last_pointL seg.res.last_pointR];
+%             prev_D = 0;
+%             th = seg.res.theta;
+%         
+%             while true
+% %                 disp(['Current Lower Bound: ',num2str(lb)])
+%                 X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+%                 X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+%                 W_l = w_l(lb:ub); W_r = w_r(lb:ub);
+% 
+%                 [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
+%                                          false,fixed_status,adjacent_seg_type,...
+%                                          fixed_points,prev_D,th);
+% 
+%                 err_tot = [err.full_l err.full_r];
+%                 
+%                 if length(find(err_tot >= 10*1e-2)) >= 3
+%                     disp('-Threshold for arc approximation exceeded')
+%                     disp(['-Segment: Idx ',num2str(lb),' ~ ',num2str(ub-1)])
+% 
+%                     seg = struct();
+%                     seg.res = prev_res;
+%                     seg.err = prev_err;
+%                     seg.status = 'last'; % Marking initial segment approximation
+%                     seg.bnds = [lb ub-1];
+% 
+%                     obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
+% 
+%                     adjacent_seg_type = 'arc';
+%                     fixed_points = [prev_res.init_pointL prev_res.init_pointR];
+%                     prev_D = prev_res.D;
+%                     th = prev_res.th_init;
+%                     
+%                     lb = ub;
+%                     ub = lb + 300;
+% 
+%                     if ub > n
+%                         disp('Arc Approximation for last segment finished')
+%                         ub = n;
+%                         X_l = LP_l(1,lb:ub); Y_l = LP_l(2,lb:ub);
+%                         X_r = LP_r(1,lb:ub); Y_r = LP_r(2,lb:ub);
+%                         W_l = w_l(lb:ub); W_r = w_r(lb:ub);
+% 
+%                         [res, err] = CircleFitV3(X_l,X_r,Y_l,Y_r,W_l,W_r,...
+%                                                false,fixed_status,adjacent_seg_type,...
+%                                                fixed_points,prev_D,th);
+%                         seg = struct();
+%                         seg.res = res;
+%                         seg.err = err;
+%                         seg.status = 'last';
+%                         seg.bnds = [lb n];
+%                         
+%                         obj.opt.arc_segments = [{seg} obj.opt.arc_segments];
+%                         break;
+%                     end
+%                 else
+%                     prev_res = res;
+%                     prev_err = err;
+%                     ub = ub+1;
+%                     
+%                     if ub > n
+%                         disp('Arc Approximation for first segment finished')
+%                         obj.opt.arc_segments = [{prev_res} obj.opt.arc_segments];
+%                         break;
+%                     end
+%                 end
+%             end
 
 
             %% Two-way optimization for segments in between
@@ -349,7 +396,8 @@ classdef CurveFit < handle
         %% Phase 3: Shift Segments to match lateral position (Optimization)
         function obj = optimizePh3(obj)
         end
-
+        
+        %% Plot Results
         function plotRes(obj)
             line_segs = obj.opt.line_segments;
             arc_segs = obj.opt.arc_segments;
@@ -470,12 +518,75 @@ function [lb, ub] = findBestIntv(LP_l,LP_r,w_l,w_r,x0)
         Y_l = LP_l(2,lb_:ub_);
         X_r = LP_r(1,lb_:ub_);
         Y_r = LP_r(2,lb_:ub_);
-        [~,err] = LineFitV2(X_l,X_r,Y_l,Y_r,...
+        [res,err] = LineFitV2(X_l,X_r,Y_l,Y_r,...
                               w_l(lb_:ub_), w_r(lb_:ub_),false);
 
-        f.Fval = 1/(ub_ - lb_ + 1)^(3.4) * err.tot;
+        f.Fval = 1/res.L^(2) * err.wrmse;
     end
     
 end
 
+%% Find Best Interval for Arc Spline Fitting with Surrogate Optimization
+function [res_,err_,bnd] = findBestBnd(LP_l,LP_r,w_l,w_r,fix_status,adj_seg,fixed_points,D,th,bnds)
+    options = optimoptions('surrogateopt','Display','none','UseParallel',true,'MaxFunctionEvaluations',100);
+    
+    switch fix_status
+        case 'Back'
+            if bnds(2) - 300 < bnds(1)
+                bnd = bnds(1);
+                disp('Lower Bound for optimization reached...')
+            else
+                bnd = surrogateopt(@costfunc,bnds(1),bnds(2)-300,1,options);
+            end
 
+            lb = bnd; ub = bnds(2);
+            X_l_ = LP_l(1,lb:ub);
+            Y_l_ = LP_l(2,lb:ub);
+            X_r_ = LP_r(1,lb:ub);
+            Y_r_ = LP_r(2,lb:ub);
+        case 'Front'
+            if bnds(1) + 300 > bnds(2)
+                bnd = bnds(2);
+                disp('Upper Bound for optimization reached...')
+            else
+                bnd = surrogateopt(@costfunc,bnds(1)+300,bnds(2),1,options);
+            end
+            
+            lb = bnds(1); ub = bnd;
+            X_l_ = LP_l(1,lb:ub);
+            Y_l_ = LP_l(2,lb:ub);
+            X_r_ = LP_r(1,lb:ub);
+            Y_r_ = LP_r(2,lb:ub);
+    end
+    
+    [res_,err_] = CircleFitV3(X_l_,X_r_,Y_l_,Y_r_,...
+                              w_l(lb:ub),w_r(lb:ub),false,...
+                              fix_status,adj_seg,fixed_points,D,th);
+
+    %% Cost Function for Surrogate Optimization
+    function f = costfunc(x)
+        switch fix_status
+            case 'Back'
+                lb_ = x; ub_ = bnds(2);
+                X_l = LP_l(1,lb_:ub_);
+                Y_l = LP_l(2,lb_:ub_);
+                X_r = LP_r(1,lb_:ub_);
+                Y_r = LP_r(2,lb_:ub_);
+                
+            case 'Front'
+                lb_ = bnds(1); ub_ = x;
+                X_l = LP_l(1,lb_:ub_);
+                Y_l = LP_l(2,lb_:ub_);
+                X_r = LP_r(1,lb_:ub_);
+                Y_r = LP_r(2,lb_:ub_);
+            
+        end
+        [res,err] = CircleFitV3(X_l,X_r,Y_l,Y_r,...
+                                w_l(lb_:ub_),w_r(lb_:ub_),false,...
+                                fix_status,adj_seg,fixed_points,D,th);
+        
+        f.Fval = 1/(res.L)^(0.8) * err.wrmse;
+        
+    end
+
+end
