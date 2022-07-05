@@ -10,9 +10,19 @@ CircleFitV2 is an extended version of CircleFit, where we fit 2 parallel road la
 Unlike CircleFit, CircleFitV2 needs separate data points and weights for both lanes.
 More deeper analysis is done in CircleFitV2 for my personal research(Vehicle Lane Mapping)
 
-> Detailed explanation will be provided in paperwork later(To be done!)
+# CircleFitV3(Latest!)
 
-> Optimization Framework will also be implemented for merging discontinuous, but consecutive "parametrized" lane segments: Simple Non-Linear Optimization needed
+CircleFitV3 is probably the final version of circle fit, providing 3 different types of modes for circle fitting
+1. Free ends
+2. One end fixed(To be accurate, the end points are constrained to a line)
+3. Both ends fixed(Two ends have line constraints)
+
+# CurveFit(Latest!)
+
+CurveFit fits 2 parallel vehicle lane points with straight lines and arcs.
+Works with LineFitV2, CircleFitV3, StringCreator, FindSegOrder files
+
+StringCreator and FindSegOrder may need more modification in the future
 
 ## CircleFitV2 Example
 ![ArcParam1](https://user-images.githubusercontent.com/50237894/173098378-ec0e9892-1b34-4ad5-bb8e-5945d3240cc5.jpg)
