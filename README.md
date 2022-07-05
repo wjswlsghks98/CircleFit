@@ -20,7 +20,7 @@ CircleFitV3 is probably the final version of circle fit, providing 3 different t
 
 3. Both ends fixed(Two ends have line constraints)
 
-# CurveFit(Latest!)
+# CurveFitV2(Latest!)
 
 CurveFit fits 2 parallel vehicle lane points with straight lines and arcs.
 
