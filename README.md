@@ -13,13 +13,17 @@ More deeper analysis is done in CircleFitV2 for my personal research(Vehicle Lan
 # CircleFitV3(Latest!)
 
 CircleFitV3 is probably the final version of circle fit, providing 3 different types of modes for circle fitting
+
 1. Free ends
+
 2. One end fixed(To be accurate, the end points are constrained to a line)
+
 3. Both ends fixed(Two ends have line constraints)
 
 # CurveFit(Latest!)
 
 CurveFit fits 2 parallel vehicle lane points with straight lines and arcs.
+
 Works with LineFitV2, CircleFitV3, StringCreator, FindSegOrder files
 
 StringCreator and FindSegOrder may need more modification in the future
