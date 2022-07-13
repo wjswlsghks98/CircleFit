@@ -4,15 +4,13 @@
 CircleFit is simply fitting noisy, weighted 2D data points into a single circle.
 More information is written in the script "CircleFit.m"
 
-# CircleFitV2
+# CircleFitV2, 3
 
 CircleFitV2 is an extended version of CircleFit, where we fit 2 parallel road lane by cocentric circles.
 Unlike CircleFit, CircleFitV2 needs separate data points and weights for both lanes.
 More deeper analysis is done in CircleFitV2 for my personal research(Vehicle Lane Mapping)
 
-# CircleFitV3(Latest!)
-
-CircleFitV3 is probably the final version of circle fit, providing 3 different types of modes for circle fitting
+3 different types of modes for circle fitting in 3rd version
 
 1. Free ends
 
@@ -20,7 +18,7 @@ CircleFitV3 is probably the final version of circle fit, providing 3 different t
 
 3. Both ends fixed(Two ends have line constraints)
 
-# CurveFitV2(Latest!)
+# CurveFitV2
 
 CurveFit fits 2 parallel vehicle lane points with straight lines and arcs.
 
@@ -33,3 +31,7 @@ StringCreator and FindSegOrder may need more modification in the future
 > From data idx 1~2700
 
 ![ArcParam2](https://user-images.githubusercontent.com/50237894/173098612-d7ec5fd5-252f-4fd6-bdff-e42a19bce54b.jpg)
+
+# Circle2DFit(Latest)
+Purpose is the same as CircleFitV2, but uses lane point covariance data instead of 1 dimensional weights. 
+Nonlinear Least Squares is implemented via "lsqnonlin.m"
