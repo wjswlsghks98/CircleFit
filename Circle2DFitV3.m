@@ -66,7 +66,7 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
     disp('<Step 2: Multi-Arc Spline>')
     options = optimoptions('lsqnonlin','SpecifyObjectiveGradient',true,...
                            'Display','iter-detailed','Algorithm','trust-region-reflective',...
-                           'FunctionTolerance',1e-12,'MaxIterations',inf);
+                           'FunctionTolerance',1e-12,'MaxIterations',inf,'CheckGradients',false);
 
     % Compute Initial Values
     for j=1:m
@@ -195,7 +195,6 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
         end
         
         coeffs_l = coeffs;
-%         disp(coeffs_l)
         coeffs_r = coeffs;
         coeffs_r(:,2) = -coeffs(:,2);
         % Variable Clustering 
@@ -206,7 +205,8 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
         R_params = [R1; delL; Ls'];
         res = []; jac = [];
         intvs_ = intvs(2:end-1);
-        th_bnd = th(intvs_ - rel_base + 1); 
+        bnds = intvs_ - rel_base + 1;
+        th_bnd = th(bnds); 
         
         % Computing Residual and Jacobian for each segment
         for i=1:m
@@ -257,7 +257,7 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
                 lp_pred_r = [x_ + R_r * cos(th_(k));
                              y_ + R_r * sin(th_(k))];
                 lp_r = LP_r(:,seg_intvs(i,1) + k - 1);
-                covr = reshape(cov_l(:,seg_intvs(i,1) + k - 1),2,2);
+                covr = reshape(cov_r(:,seg_intvs(i,1) + k - 1),2,2);
                 resi(2*n_+2*k-1:2*n_+2*k) = InvMahalanobis(lp_pred_r - lp_r, covr);
 
                 jacME_l = zeros(2,blk_width);
@@ -269,8 +269,8 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
                     jacME_l(1,3:4) = coeffs_l(i,1:2) * cos(th_(k));
                     jacME_l(2,3:4) = coeffs_l(i,1:2) * sin(th_(k));
                     % th elements
-                    jacME_l(1,4+m-1+lb_:4+m-1+ub_) = -R_l * sin(th_(k));
-                    jacME_l(2,4+m-1+lb_:4+m-1+ub_) = R_l * cos(th_(k));
+                    jacME_l(1,4+m-1+lb_ + k - 1) = -R_l * sin(th_(k));
+                    jacME_l(2,4+m-1+lb_ + k - 1) = R_l * cos(th_(k));
 
                     % x y elements
                     jacME_r(1,1) = 1; jacME_r(2,2) = 1;
@@ -278,8 +278,8 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
                     jacME_r(1,3:4) = coeffs_r(i,1:2) * cos(th_(k));
                     jacME_r(2,3:4) = coeffs_r(i,1:2) * sin(th_(k));
                     % th elements
-                    jacME_r(1,4+m-1+lb_:4+m-1+ub_) = -R_r * sin(th_(k));
-                    jacME_r(2,4+m-1+lb_:4+m-1+ub_) = R_r * cos(th_(k));
+                    jacME_r(1,4+m-1+lb_ + k - 1) = -R_r * sin(th_(k));
+                    jacME_r(2,4+m-1+lb_ + k - 1) = R_r * cos(th_(k));
                 else
                     % coeffs format: [R_sign delL_sign (Li+1_signs)]                                         
                     % x y elements
@@ -291,11 +291,12 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
                     jacME_l(1,4+1:4+i-1) = coeffs_l(i,2+1:2+i-1) * cos(th_(k)) + cos(th_bnd(1:i-1));
                     jacME_l(2,4+1:4+i-1) = coeffs_l(i,2+1:2+i-1) * sin(th_(k)) + sin(th_bnd(1:i-1));
                     % th elements
-                    jacME_l(1,4+m-1+lb_:4+m-1+ub_) = -R_l * sin(th_(k));
-                    jacME_l(2,4+m-1+lb_:4+m-1+ub_) = R_l * cos(th_(k));
-                    % th elements -end                    
-                    jacME_l(1,4+m-1+ intvs_ - rel_base + 1) = jacME_l(1,4+m-1+ intvs_ - rel_base + 1) - Ls(1:i-1).* sin(th_bnd(1:i-1));
-                    jacME_l(2,4+m-1+ intvs_ - rel_base + 1) = jacME_l(2,4+m-1+ intvs_ - rel_base + 1) + Ls(1:i-1).* cos(th_bnd(1:i-1));
+                    jacME_l(1,4+m-1+lb_ + k - 1) = -R_l * sin(th_(k));
+                    jacME_l(2,4+m-1+lb_ + k - 1) = R_l * cos(th_(k));
+                    % th elements -end         
+                    
+                    jacME_l(1,4+m-1+ bnds(1:i-1)) = jacME_l(1,4+m-1+ bnds(1:i-1)) - Ls(1:i-1).* sin(th_bnd(1:i-1));
+                    jacME_l(2,4+m-1+ bnds(1:i-1)) = jacME_l(2,4+m-1+ bnds(1:i-1)) + Ls(1:i-1).* cos(th_bnd(1:i-1));
 
                     % x y elements
                     jacME_r(1,1) = 1; jacME_r(2,2) = 1;
@@ -306,11 +307,11 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
                     jacME_r(1,4+1:4+i-1) = coeffs_r(i,2+1:2+i-1) * cos(th_(k)) + cos(th_bnd(1:i-1));
                     jacME_r(2,4+1:4+i-1) = coeffs_r(i,2+1:2+i-1) * sin(th_(k)) + sin(th_bnd(1:i-1));
                     % th elements
-                    jacME_r(1,4+m-1+lb_:4+m-1+ub_) = -R_r * sin(th_(k));
-                    jacME_r(2,4+m-1+lb_:4+m-1+ub_) = R_r * cos(th_(k));
+                    jacME_r(1,4+m-1+lb_ + k - 1) = -R_r * sin(th_(k));
+                    jacME_r(2,4+m-1+lb_ + k - 1) = R_r * cos(th_(k));
                     % th elements -end                    
-                    jacME_r(1,4+m-1+ intvs_ - rel_base + 1) = jacME_r(1,4+m-1+ intvs_ - rel_base + 1) - Ls(1:i-1).* sin(th_bnd(1:i-1));
-                    jacME_r(2,4+m-1+ intvs_ - rel_base + 1) = jacME_r(2,4+m-1+ intvs_ - rel_base + 1) + Ls(1:i-1).* cos(th_bnd(1:i-1));
+                    jacME_r(1,4+m-1+ bnds(1:i-1)) = jacME_r(1,4+m-1+ bnds(1:i-1)) - Ls(1:i-1).* sin(th_bnd(1:i-1));
+                    jacME_r(2,4+m-1+ bnds(1:i-1)) = jacME_r(2,4+m-1+ bnds(1:i-1)) + Ls(1:i-1).* cos(th_bnd(1:i-1));
                 end
 
                 [I1,J1,V1] = sparseFormat(2*k-1:2*k,1:blk_width,InvMahalanobis(jacME_l,covl));
@@ -321,6 +322,7 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
             MEsubBlock = sparse(I,J,V,blk_height,blk_width);
             res = [res; resi]; jac = [jac; MEsubBlock];            
         end
+        
     end
 
     %% Compute Error
@@ -338,7 +340,9 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
             err.full_l = zeros(1,n); err.full_r = zeros(1,n);
             err.wthres = sqrt(chi2inv(thres,2));
             cnt_l = 0; cnt_r = 0;
-
+            
+            err.violated_l_idx = [];
+            err.violated_r_idx = [];
             for k=1:n
                 diff_l = seg_.LP_l(:,k) - LP_l(:,seg_intvs(i,1) + k - 1);
                 diff_r = seg_.LP_r(:,k) - LP_r(:,seg_intvs(i,1) + k - 1);
@@ -350,9 +354,11 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
                 err.full_r(k) = sqrt(diff_r' * diff_r);
                 if err.wfull_l(k) > err.wthres
                     cnt_l = cnt_l + 1;
+                    err.violated_l_idx = [err.violated_l_idx k];
                 end
                 if err.wfull_r(k) > err.wthres
                     cnt_r = cnt_r + 1;
+                    err.violated_r_idx = [err.violated_r_idx k];
                 end
             end
 
@@ -373,17 +379,31 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
         figure(1); hold on; grid on; axis equal;
         p_data_l = plot(LP_l(1,intvs(1):intvs(end)),LP_l(2,intvs(1):intvs(end)),'r.');
         p_data_r = plot(LP_r(1,intvs(1):intvs(end)),LP_r(2,intvs(1):intvs(end)),'g.');
-        for i=1:1
+        for i=1:m
             seg_ = res.segs{i};
-            p_approx = plot(seg_.LP_l(1,:),seg_.LP_l(2,:),'k.');
-            plot(seg_.LP_r(1,:),seg_.LP_r(2,:),'k.');
+            seg_err = err{i};
+            p_approx = plot(seg_.LP_l(1,:),seg_.LP_l(2,:),'k--');
+            plot(seg_.LP_r(1,:),seg_.LP_r(2,:),'k--');
             
+            % Control Points
             cts = [seg_.LP_l(:,1) seg_.LP_l(:,end) seg_.LP_r(:,1) seg_.LP_r(:,end)];
             p_ct = plot(cts(1,:),cts(2,:),'bp');
+            
+            % Threshold Violated Points
+            vio = [seg_.LP_l(:,seg_err.violated_l_idx) seg_.LP_r(:,seg_err.violated_l_idx)];
+            if ~isempty(vio)
+                p_vio = plot(vio(1,:),vio(2,:),'cs');
+                legend([p_data_l,p_data_r,p_approx,p_ct,p_vio],...
+                'Left Lane Data','Right Lane Data', ...
+                'Arc Spline','Control Points','Violated Data Points')
+            else
+                legend([p_data_l,p_data_r,p_approx,p_ct],...
+                'Left Lane Data','Right Lane Data', ...
+                'Arc Spline','Control Points')
+            end
         end
         xlabel('Global X'); ylabel('Global Y'); title('Circular Fitting')
-        legend([p_data_l,p_data_r,p_approx,p_ct],...
-                'Left Lane Data','Right Lane Data','Arc Spline','Control Points')
+        
     end
 
 end
