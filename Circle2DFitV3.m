@@ -97,13 +97,55 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
     rel_base = seg_intvs(1,1); % Convert boundaries into relative indices
     % For example, intv = [400 500 600];
     % rel_idxs = [1 101 201];
+    
+    coeffs = zeros(m,2 + m-1); % Linear Coefficients for parameters
+        
+    % Pre-process to obtain coefficients for radius and beta(L_i's)
+    for j=1:m 
+        % coeffs format: [R_sign delL_sign (Li+1_signs)] 
+        if j == 1                
+            coeffs(j,1) = 1;
+            coeffs(j,2) = -1;                
+        else                
+            seg_ = init_segments{j};
+            
+            if strcmp(seg_.delL_status,'positive')
+                coeffs(j,2) = -1;
+            elseif strcmp(seg_.delL_status,'negative')
+                coeffs(j,2) = 1;
+            end
 
-    opt = lsqnonlin(@cost_func,X0,[],[],options);
-
+            if strcmp(seg_.ang_status,'negative')
+                if j == 2
+                    coeffs(j,j+1) = 1;
+                    coeffs(j,1) = -1;
+                else
+                    coeffs(j,[1,3:j]) = -coeffs(j-1,[1,3:j]);
+                    coeffs(j,j+1) = 1;
+                end
+            elseif strcmp(seg_.ang_status,'positive')
+                if j == 2
+                    coeffs(j,j+1) = -1;
+                    coeffs(j,1) = 1;
+                else
+                    coeffs(j,[1,3:j]) = coeffs(j-1,[1,3:j]);
+                    coeffs(j,j+1) = -1;
+                end
+            end
+        end
+    end
+    
+    coeffs_l = coeffs;
+    coeffs_r = coeffs;
+    coeffs_r(:,2) = -coeffs(:,2);
+    
+    [opt,~,~,~,~,~,fin_jac] = lsqnonlin(@cost_func,X0,[],[],options);
+    fin_jac = sparse(fin_jac);
+    
     % Post Processing Optimization Results
     res = struct();
     res.segs = init_segments;
-
+    res.jac = fin_jac;
     opt_params = opt(1:4+m-1)';
     opt_th = opt(5+m-1:end)';
     
@@ -118,7 +160,6 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
             res.segs{j}.x = opt_params(1); res.segs{j}.y = opt_params(2); 
             res.segs{j}.R = opt_params(3); res.segs{j}.delL = opt_params(4);
             res.segs{j}.th = opt_th(lb:ub);
-            prev_th = res.segs{j}.th(end);
         else
             % opt_x format
             % [L (th, excluded overlapping initial theta)]
@@ -148,55 +189,15 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
     if plot_flag
         plotRes();
     end
-
+    
+    figure(2); spy(fin_jac' * fin_jac);
     %% NLS Cost Function
     function [res, jac] = cost_func(x)       
         % Since sign of the curvature is not likely to change during
         % optimization, use init_segments to get coefficients used for 
         % converting constrained optimization problem to unconstrained
         % problem
-
-        coeffs = zeros(m,2 + m-1); % Linear Coefficients for parameters
         
-        
-        % Pre-process to obtain coefficients for radius and beta(L_i's)
-        for i=1:m 
-            % coeffs format: [R_sign delL_sign (Li+1_signs)] 
-            if i == 1                
-                coeffs(i,1) = 1;
-                coeffs(i,2) = -1;                
-            else                
-                seg_ = init_segments{i};
-                
-                if strcmp(seg_.delL_status,'positive')
-                    coeffs(i,2) = -1;
-                elseif strcmp(seg_.delL_status,'negative')
-                    coeffs(i,2) = 1;
-                end
-
-                if strcmp(seg_.ang_status,'negative')
-                    if i == 2
-                        coeffs(i,i+1) = 1;
-                        coeffs(i,1) = -1;
-                    else
-                        coeffs(i,[1,3:i]) = -coeffs(i-1,[1,3:i]);
-                        coeffs(i,i+1) = 1;
-                    end
-                elseif strcmp(seg_.ang_status,'positive')
-                    if i == 2
-                        coeffs(i,i+1) = -1;
-                        coeffs(i,1) = 1;
-                    else
-                        coeffs(i,[1,3:i]) = coeffs(i-1,[1,3:i]);
-                        coeffs(i,i+1) = -1;
-                    end
-                end
-            end
-        end
-        
-        coeffs_l = coeffs;
-        coeffs_r = coeffs;
-        coeffs_r(:,2) = -coeffs(:,2);
         % Variable Clustering 
         x1 = x(1); y1 = x(2); R1 = x(3); delL = x(4);
         Ls = x(4+1:4+m-1)'; 
@@ -260,69 +261,118 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
                 covr = reshape(cov_r(:,seg_intvs(i,1) + k - 1),2,2);
                 resi(2*n_+2*k-1:2*n_+2*k) = InvMahalanobis(lp_pred_r - lp_r, covr);
 
-                jacME_l = zeros(2,blk_width);
-                jacME_r = zeros(2,blk_width);
+                jacME_l1 = zeros(2,4+i-1); jacME_l2 = zeros(2,1);
+                jacME_r1 = zeros(2,4+i-1); jacME_r2 = zeros(2,1);
+
                 if i == 1
                     % x y elements
-                    jacME_l(1,1) = 1; jacME_l(2,2) = 1;
+                    jacME_l1(1,1) = 1; jacME_l1(2,2) = 1;
                     % R delL elements
-                    jacME_l(1,3:4) = coeffs_l(i,1:2) * cos(th_(k));
-                    jacME_l(2,3:4) = coeffs_l(i,1:2) * sin(th_(k));
+                    jacME_l1(1,3:4) = coeffs_l(i,1:2) * cos(th_(k));
+                    jacME_l1(2,3:4) = coeffs_l(i,1:2) * sin(th_(k));
+                    
                     % th elements
-                    jacME_l(1,4+m-1+lb_ + k - 1) = -R_l * sin(th_(k));
-                    jacME_l(2,4+m-1+lb_ + k - 1) = R_l * cos(th_(k));
+                    jacME_l2(1) = -R_l * sin(th_(k));
+                    jacME_l2(2) = R_l * cos(th_(k));
 
                     % x y elements
-                    jacME_r(1,1) = 1; jacME_r(2,2) = 1;
+                    jacME_r1(1,1) = 1; jacME_r1(2,2) = 1;
                     % R delL elements
-                    jacME_r(1,3:4) = coeffs_r(i,1:2) * cos(th_(k));
-                    jacME_r(2,3:4) = coeffs_r(i,1:2) * sin(th_(k));
+                    jacME_r1(1,3:4) = coeffs_r(i,1:2) * cos(th_(k));
+                    jacME_r1(2,3:4) = coeffs_r(i,1:2) * sin(th_(k));
                     % th elements
-                    jacME_r(1,4+m-1+lb_ + k - 1) = -R_r * sin(th_(k));
-                    jacME_r(2,4+m-1+lb_ + k - 1) = R_r * cos(th_(k));
+                    jacME_r2(1) = -R_r * sin(th_(k));
+                    jacME_r2(2) = R_r * cos(th_(k));
+
+
                 else
+                    
                     % coeffs format: [R_sign delL_sign (Li+1_signs)]                                         
                     % x y elements
-                    jacME_l(1,1) = 1; jacME_l(2,2) = 1;
+                    jacME_l1(1,1) = 1; jacME_l1(2,2) = 1;
                     % R delL elements
-                    jacME_l(1,3:4) = coeffs_l(i,1:2) * cos(th_(k));
-                    jacME_l(2,3:4) = coeffs_l(i,1:2) * sin(th_(k));
+                    jacME_l1(1,3:4) = coeffs_l(i,1:2) * cos(th_(k));
+                    jacME_l1(2,3:4) = coeffs_l(i,1:2) * sin(th_(k));
                     % Li's elements
-                    jacME_l(1,4+1:4+i-1) = coeffs_l(i,2+1:2+i-1) * cos(th_(k)) + cos(th_bnd(1:i-1));
-                    jacME_l(2,4+1:4+i-1) = coeffs_l(i,2+1:2+i-1) * sin(th_(k)) + sin(th_bnd(1:i-1));
+                    jacME_l1(1,4+1:4+i-1) = coeffs_l(i,2+1:2+i-1) * cos(th_(k)) + cos(th_bnd(1:i-1));
+                    jacME_l1(2,4+1:4+i-1) = coeffs_l(i,2+1:2+i-1) * sin(th_(k)) + sin(th_bnd(1:i-1));
                     % th elements
-                    jacME_l(1,4+m-1+lb_ + k - 1) = -R_l * sin(th_(k));
-                    jacME_l(2,4+m-1+lb_ + k - 1) = R_l * cos(th_(k));
+                    if k == 1
+                        jacME_l2(1) = -R_l * sin(th_(k)) - Ls(i-1) * sin(th_bnd(i-1));
+                        jacME_l2(2) = R_l * cos(th_(k)) + Ls(i-1) * cos(th_bnd(i-1));
+                    else
+                        jacME_l2(1) = -R_l * sin(th_(k));
+                        jacME_l2(2) = R_l * cos(th_(k));
+                    end
                     % th elements -end         
+                    if k == 1
+                        jacME_l3 = zeros(2,i-2); 
+                        jacME_l3(1,:) = - Ls(1:i-2).* sin(th_bnd(1:i-2));
+                        jacME_l3(2,:) = Ls(1:i-2).* cos(th_bnd(1:i-2));
+                    else
+                        jacME_l3 = zeros(2,i-1); 
+                        jacME_l3(1,:) = - Ls(1:i-1).* sin(th_bnd(1:i-1));
+                        jacME_l3(2,:) = Ls(1:i-1).* cos(th_bnd(1:i-1));
+                    end
                     
-                    jacME_l(1,4+m-1+ bnds(1:i-1)) = jacME_l(1,4+m-1+ bnds(1:i-1)) - Ls(1:i-1).* sin(th_bnd(1:i-1));
-                    jacME_l(2,4+m-1+ bnds(1:i-1)) = jacME_l(2,4+m-1+ bnds(1:i-1)) + Ls(1:i-1).* cos(th_bnd(1:i-1));
-
-                    % x y elements
-                    jacME_r(1,1) = 1; jacME_r(2,2) = 1;
+                    jacME_r1(1,1) = 1; jacME_r1(2,2) = 1;
                     % R delL elements
-                    jacME_r(1,3:4) = coeffs_r(i,1:2) * cos(th_(k));
-                    jacME_r(2,3:4) = coeffs_r(i,1:2) * sin(th_(k));
+                    jacME_r1(1,3:4) = coeffs_r(i,1:2) * cos(th_(k));
+                    jacME_r1(2,3:4) = coeffs_r(i,1:2) * sin(th_(k));
                     % Li's elements
-                    jacME_r(1,4+1:4+i-1) = coeffs_r(i,2+1:2+i-1) * cos(th_(k)) + cos(th_bnd(1:i-1));
-                    jacME_r(2,4+1:4+i-1) = coeffs_r(i,2+1:2+i-1) * sin(th_(k)) + sin(th_bnd(1:i-1));
+                    jacME_r1(1,4+1:4+i-1) = coeffs_r(i,2+1:2+i-1) * cos(th_(k)) + cos(th_bnd(1:i-1));
+                    jacME_r1(2,4+1:4+i-1) = coeffs_r(i,2+1:2+i-1) * sin(th_(k)) + sin(th_bnd(1:i-1));
                     % th elements
-                    jacME_r(1,4+m-1+lb_ + k - 1) = -R_r * sin(th_(k));
-                    jacME_r(2,4+m-1+lb_ + k - 1) = R_r * cos(th_(k));
-                    % th elements -end                    
-                    jacME_r(1,4+m-1+ bnds(1:i-1)) = jacME_r(1,4+m-1+ bnds(1:i-1)) - Ls(1:i-1).* sin(th_bnd(1:i-1));
-                    jacME_r(2,4+m-1+ bnds(1:i-1)) = jacME_r(2,4+m-1+ bnds(1:i-1)) + Ls(1:i-1).* cos(th_bnd(1:i-1));
+                    if k == 1
+                        jacME_r2(1) = -R_r * sin(th_(k)) - Ls(i-1) * sin(th_bnd(i-1));
+                        jacME_r2(2) = R_r * cos(th_(k)) + Ls(i-1) * cos(th_bnd(i-1));
+                    else
+                        jacME_r2(1) = -R_r * sin(th_(k));
+                        jacME_r2(2) = R_r * cos(th_(k));
+                    end
+                    % th elements -end         
+                    if k == 1
+                        jacME_r3 = zeros(2,i-2);
+                        jacME_r3(1,:) = - Ls(1:i-2).* sin(th_bnd(1:i-2));
+                        jacME_r3(2,:) = Ls(1:i-2).* cos(th_bnd(1:i-2));
+                    else
+                        jacME_r3 = zeros(2,i-1);
+                        jacME_r3(1,:) = - Ls(1:i-1).* sin(th_bnd(1:i-1));
+                        jacME_r3(2,:) = Ls(1:i-1).* cos(th_bnd(1:i-1));
+                    end
+                end
+                
+                [I1,J1,V1] = sparseFormat(2*k-1:2*k,1:4+i-1,InvMahalanobis(jacME_l1,covl));
+                [I2,J2,V2] = sparseFormat(2*k-1:2*k,4+m-1+lb_+k-1,InvMahalanobis(jacME_l2,covl));
+                if i~=1
+                    if k == 1
+                        [I3,J3,V3] = sparseFormat(2*k-1:2*k,4+m-1+ bnds(1:i-2),InvMahalanobis(jacME_l3,covl));
+                    else
+                        [I3,J3,V3] = sparseFormat(2*k-1:2*k,4+m-1+ bnds(1:i-1),InvMahalanobis(jacME_l3,covl));
+                    end
+                else
+                    I3 = []; J3 = []; V3 = [];
+                end
+                [I4,J4,V4] = sparseFormat(2*n_+2*k-1:2*n_+2*k,1:4+i-1,InvMahalanobis(jacME_r1,covr));
+                [I5,J5,V5] = sparseFormat(2*n_+2*k-1:2*n_+2*k,4+m-1+lb_+k-1,InvMahalanobis(jacME_r2,covr));
+                if i~=1
+                    if k == 1
+                        [I6,J6,V6] = sparseFormat(2*n_+2*k-1:2*n_+2*k,4+m-1+ bnds(1:i-2),InvMahalanobis(jacME_r3,covl));
+                    else
+                        [I6,J6,V6] = sparseFormat(2*n_+2*k-1:2*n_+2*k,4+m-1+ bnds(1:i-1),InvMahalanobis(jacME_r3,covl));
+                    end
+                else
+                    I6 = []; J6 = []; V6 = [];
                 end
 
-                [I1,J1,V1] = sparseFormat(2*k-1:2*k,1:blk_width,InvMahalanobis(jacME_l,covl));
-                [I2,J2,V2] = sparseFormat(2*n_+2*k-1:2*n_+2*k,1:blk_width,InvMahalanobis(jacME_r,covr));
-                I = [I I1 I2]; J = [J J1 J2]; V = [V V1 V2];
+                I = [I I1 I2 I3 I4 I5 I6]; 
+                J = [J J1 J2 J3 J4 J5 J6]; 
+                V = [V V1 V2 V3 V4 V5 V6];
                 
             end
             MEsubBlock = sparse(I,J,V,blk_height,blk_width);
-            res = [res; resi]; jac = [jac; MEsubBlock];            
+            res = [res; resi]; jac = [jac; MEsubBlock];        
         end
-        
     end
 
     %% Compute Error
@@ -378,7 +428,7 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
     function plotRes()
         figure(1); hold on; grid on; axis equal;
         p_data_l = plot(LP_l(1,intvs(1):intvs(end)),LP_l(2,intvs(1):intvs(end)),'r.');
-        p_data_r = plot(LP_r(1,intvs(1):intvs(end)),LP_r(2,intvs(1):intvs(end)),'g.');
+        plot(LP_r(1,intvs(1):intvs(end)),LP_r(2,intvs(1):intvs(end)),'r.');
         for i=1:m
             seg_ = res.segs{i};
             seg_err = err{i};
@@ -390,15 +440,15 @@ function [res, err] = Circle2DFitV3(LP_l,LP_r,cov_l,cov_r,thres,intvs,plot_flag)
             p_ct = plot(cts(1,:),cts(2,:),'bp');
             
             % Threshold Violated Points
-            vio = [seg_.LP_l(:,seg_err.violated_l_idx) seg_.LP_r(:,seg_err.violated_l_idx)];
+            vio = [seg_.LP_l(:,seg_err.violated_l_idx) seg_.LP_r(:,seg_err.violated_r_idx)];
             if ~isempty(vio)
                 p_vio = plot(vio(1,:),vio(2,:),'cs');
-                legend([p_data_l,p_data_r,p_approx,p_ct,p_vio],...
-                'Left Lane Data','Right Lane Data', ...
+                legend([p_data_l,p_approx,p_ct,p_vio],...
+                'Lane Data',...
                 'Arc Spline','Control Points','Violated Data Points')
             else
-                legend([p_data_l,p_data_r,p_approx,p_ct],...
-                'Left Lane Data','Right Lane Data', ...
+                legend([p_data_l,p_approx,p_ct],...
+                'Lane Data',...
                 'Arc Spline','Control Points')
             end
         end
