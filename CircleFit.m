@@ -49,13 +49,13 @@ function [res, err] = CircleFit(X, Y, w, plot_flag)
     res.th_last = atan2(Y(end) - res.y, X(end) - res.x);
     res.L = res.R * abs(res.th_last - res.th_init); % arc length
 
-    if ~isreal(R)
+    if ~isreal(res.R)
         warning('Complex radius detected, adjust dataset')
     end
     %% Curvature Analysis
     % [Step 1: Determining initial data point heading angle]
     head_cnds = [res.th_init - pi/2, res.th_init + pi/2];
-    diff = [X(1)-X(end);Y(1)-Y(end)] + res.L * [cos(head_cnds); sin(head_cnds)];
+    diff = [X(1)-X(end);Y(1)-Y(end)] + (res.L/10) * [cos(head_cnds); sin(head_cnds)];
     d1 = diff(:,1)' * diff(:,1); d2 = diff(:,2)' * diff(:,2);
     
     if d1 < d2
@@ -65,26 +65,46 @@ function [res, err] = CircleFit(X, Y, w, plot_flag)
     end
 
     % [Step 2: Find sign of curvature]
-    
+    R_cnds = [res.R, -res.R];
+    diff = [X(1)-res.x;Y(1)-res.y] + R_cnds.* [-sin(head);cos(head)];
+    d1 = diff(:,1)' * diff(:,1); d2 = diff(:,2)' * diff(:,2);
+
+    if d1 < d2
+        res.kappa = 1/res.R;
+    else
+        res.kappa = -1/res.R;
+    end
 
     %% Error Analysis
-    D = sqrt((X - x).^2 + (Y - y).^2);
     err = struct();
-    err.full = D - R; % Naive Error
-    % Non-Weighted Error Computation
-    err.se = sum((err.full).^2);
-    err.mse = err.se / length(D);
-    err.rmse = sqrt(err.mse);
-    % Weighted Error Computation
-    err.wse = sum((err.full).^2./w);
-    err.wmse = err.wse / length(D);
-    err.wrmse = sqrt(err.wmse);
+%     D = sqrt((X - x).^2 + (Y - y).^2);
+%     
+%     err.full = D - R; % Naive Error
+%     % Non-Weighted Error Computation
+%     err.se = sum((err.full).^2);
+%     err.mse = err.se / length(D);
+%     err.rmse = sqrt(err.mse);
+%     % Weighted Error Computation
+%     err.wse = sum((err.full).^2./w);
+%     err.wmse = err.wse / length(D);
+%     err.wrmse = sqrt(err.wmse);
 
     %% Plot Results
     if plot_flag
+        % Full Circle
         figure(1);
         p_data = plot(X, Y, 'ro'); hold on; grid on; axis equal;
         th = 0:pi/100:2*pi;
+        xc = res.R * cos(th) + res.x;
+        yc = res.R * sin(th) + res.y;
+        p_fit = plot(xc,yc, 'k--');
+        xlabel('X'); ylabel('Y'); title('Circular Fitting');
+        legend([p_data, p_fit],'Original dataset', 'Optimized Circle')
+
+        % Focused Plot
+        figure(2);
+        p_data = plot(X, Y, 'ro'); hold on; grid on; axis equal;
+        th = linspace(res.th_last,res.th_init);
         xc = R * cos(th) + x;
         yc = R * sin(th) + y;
         p_fit = plot(xc,yc, 'k--');
