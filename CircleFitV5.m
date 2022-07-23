@@ -77,36 +77,97 @@ classdef CircleFitV5 < handle
 
         %% Optimize
         function obj = optimize(obj)
-            options = optimoptions('lsqnonlin','SpecifyObjectiveGradient',true,...
-                                   'Display','iter-detailed','Algorithm','trust-region-reflective');
-            obj.opt.fullx = lsqnonlin(@obj.cost_func,obj.opt.X0,[],[],options);
+            options = optimoptions('lsqnonlin','SpecifyObjectiveGradient',false,...
+                                   'Display','iter-detailed','Algorithm','trust-region-reflective',...
+                                   'UseParallel',true,'MaxFunctionEvaluations',inf,'StepTolerance',1e-9);
+            % Need to set lower bounds for arc lengths
+            lb1 = [-inf,-inf,-inf];
+            lb2 = [-inf 20];
+            lb = horzcat(lb1,repmat(lb2,1,obj.num_seg));
+            [obj.opt.fullx,~,obj.opt.res,~,~,~,obj.opt.jac] = lsqnonlin(@obj.cost_func,obj.opt.X0,lb,[],options);
+            
+            % Need to post process optimization results
+            obj.opt.segments = obj.segments;
+            m = length(obj.segments);
+            x0 = obj.opt.fullx(1); y0 = obj.opt.fullx(2); tau = obj.opt.fullx(3);
+            kappa = obj.opt.fullx(4); L = obj.opt.fullx(5);
+
+            xc = x0 - 1/kappa * sin(tau); yc = y0 + 1/kappa * cos(tau);
+            init_point = [x0; y0];
+            last_point = [xc + 1/kappa * sin(tau+kappa*L);
+                          yc - 1/kappa * cos(tau+kappa*L)];
+            obj.opt.segments{1}.xc = xc;
+            obj.opt.segments{1}.yc = yc;
+            obj.opt.segments{1}.kappa = kappa;
+            obj.opt.segments{1}.L = L;
+            obj.opt.segments{1}.init_point = init_point;
+            obj.opt.segments{1}.last_point = last_point;
+            obj.opt.segments{1}.th_init = atan2(init_point(2)-yc,init_point(1)-xc);
+            obj.opt.segments{1}.th_last = atan2(last_point(2)-yc,last_point(1)-xc);            
+            
+            for i=2:m                
+                
+                tau = tau + kappa * L;
+                xc = xc + 1/kappa * sin(tau);
+                yc = yc - 1/kappa * cos(tau);
+                kappa = obj.opt.fullx(3+2*i-1);
+
+                xc = xc - 1/kappa * sin(tau);
+                yc = yc + 1/kappa * cos(tau);
+                L = obj.opt.fullx(3+2*i);
+
+                init_point = last_point;
+                last_point = [xc + 1/kappa * sin(tau+kappa*L);
+                              yc - 1/kappa * cos(tau+kappa*L)];
+                
+                obj.opt.segments{i}.xc = xc;
+                obj.opt.segments{i}.yc = yc;
+                obj.opt.segments{i}.kappa = kappa;
+                obj.opt.segments{i}.L = L;
+                obj.opt.segments{i}.init_point = init_point;
+                obj.opt.segments{i}.last_point = last_point;
+                obj.opt.segments{i}.th_init = atan2(init_point(2)-yc,init_point(1)-xc);
+                obj.opt.segments{i}.th_last = atan2(last_point(2)-yc,last_point(1)-xc);
+            end
+
+            obj.plotRes();
         end
 
         %% Cost Function
         function [res,jac] = cost_func(obj,x0)
+            obj.segments = {};
             % [Part 1: Precompute parameter jacobians and calculate circle centers]
-            obj.precompJac(x0);
-            error('1');
+            obj.precompJac(x0);            
             % [Part 2: Divide data points using initial segment data]
-            obj.segments = ClassifyLP(obj.LP(:,obj.intv(1):obj.intv(end)),...
-                                      obj.init_segments,obj.intv);
-            
-            
+            obj.classifyLP();                  
             % [Part 3: Compute full jacobian and residual]
+            % Part 3-1: Normal Measurement Jacobian using chain rule
+            obj.CreateMEBlock();
+            % Part 3-2: Initial point and Last point Measurement Jacobian
+            obj.CreateMEBlock2(x0);
+
+            obj.Merge();
+            res = obj.opt.res;
+            jac = obj.opt.jac;
         end
         
         %% Precompute Jacobians
         function obj = precompJac(obj,x0)
             tau = x0(3); kappa = x0(4); L = x0(5);
             xc = x0(1) - 1/kappa * sin(tau); yc = x0(2) + 1/kappa * cos(tau);
+            init_point = x0(1:2);
+            last_point = init_point + 1/kappa * [sin(tau+kappa*L)-sin(tau); -cos(tau+kappa*L)+cos(tau)];
             jac_ = zeros(3,3+2*obj.num_seg);
             jac_(:,1:4) = [1, 0, -1/kappa * cos(tau), 1/kappa^2 * sin(tau);
                            0, 1, -1/kappa * sin(tau), -1/kappa^2 * cos(tau);
                            0, 0,                   0,                     1];
             seg = struct();
-            seg.xc = xc; seg.yc = yc;
+            seg.xc = xc; seg.yc = yc; seg.kappa = kappa;
             seg.Cjac = jac_; % Chain Rule Based Pre-computed Jacobian
-        
+            seg.init_point = init_point;
+            seg.last_point = last_point;
+            seg.th_init = atan2(init_point(2) - yc,init_point(1) - xc);
+            seg.th_last = atan2(last_point(2) - yc,last_point(1) - xc);
             obj.segments = [obj.segments {seg}];
 
             for i=2:obj.num_seg                               
@@ -166,58 +227,198 @@ classdef CircleFitV5 < handle
                 L = x0(3+2*i); % Li --> Li+1
 
                 seg = struct();
-                seg.xc = xc; seg.yc = yc;
+                seg.xc = xc; seg.yc = yc; seg.kappa = kappa;
                 seg.Cjac = jac_; % Chain Rule Based Pre-computed Jacobian
-            
+                init_point = last_point;
+                last_point = init_point + 1/kappa * [sin(tau+kappa*L)-sin(tau); -cos(tau+kappa*L)+cos(tau)];
+                seg.init_point = init_point;
+                seg.last_point = last_point;
+                seg.th_init = atan2(init_point(2) - yc,init_point(1) - xc);
+                seg.th_last = atan2(last_point(2) - yc,last_point(1) - xc);
                 obj.segments = [obj.segments {seg}];
             end
-
+            
+%             figure(1); hold on; grid on; axis equal;
+%             m = length(obj.segments);
+%             for i=1:m
+%                 plot(obj.segments{i}.init_point(1),...
+%                      obj.segments{i}.init_point(2),'kx');
+%                 plot(obj.segments{i}.last_point(1),...
+%                      obj.segments{i}.last_point(2),'rx');
+%             end
+%             plot(obj.LP(1,obj.intv(1):obj.intv(2)),...
+%                  obj.LP(2,obj.intv(1):obj.intv(2)),'b.');
 
         end
+
+        %% Classify Lane Points based on angles
+        function obj = classifyLP(obj)
+            n = length(obj.segments);
+            LP_cpyd = [obj.LP(:,obj.intv(1):obj.intv(end)); 
+                       obj.intv(1):obj.intv(end)];
+            for i=1:n
+                if i~=n
+                    x = obj.segments{i}.xc;
+                    y = obj.segments{i}.yc;
+                    th_init = obj.segments{i}.th_init;
+                    th_last = obj.segments{i}.th_last;
+                    ths = atan2(LP_cpyd(2,:) - y, LP_cpyd(1,:) - x);
+                    ths_valididx = findInBetweenIdxs(ths,[th_init,th_last]);
+                    
+                    LP_cpyd_valid = LP_cpyd(:,ths_valididx);
+                    LP_cpyd(:,ths_valididx) = [];
+                else
+                    LP_cpyd_valid = LP_cpyd;
+                end
+                
+                obj.segments{i}.num = i;
+                obj.segments{i}.LP_idxs = LP_cpyd_valid(3,:);
+                obj.segments{i}.LP_points = LP_cpyd_valid(1:2,:);                 
+            end
+        end
+        
+        %% Create Normal Measurement Jacobian
+        function obj = CreateMEBlock(obj)
+            m = length(obj.segments);
+            
+            obj.opt.ME_block = zeros(obj.intv(end)-obj.intv(1)+1,3+2*obj.num_seg);
+            obj.opt.ME_vec = zeros(obj.intv(end)-obj.intv(1)+1,1);
+            cnt = 0;
+            for i=1:m
+                n = length(obj.segments{i}.LP_points);
+                xc = obj.segments{i}.xc;
+                yc = obj.segments{i}.yc;
+                kappa = obj.segments{i}.kappa;
+                
+                for j = cnt+1:cnt+n
+                    LP_idx = obj.segments{i}.LP_idxs(j-cnt);
+                    cov_ = obj.w(LP_idx);
+%                     cov_ = 1;
+                    xk = obj.segments{i}.LP_points(1,j-cnt);
+                    yk = obj.segments{i}.LP_points(2,j-cnt);
+                    resi = sqrt((xc - xk)^2 + (yc - yk)^2) - abs(1/kappa);
+                    obj.opt.ME_vec(j) = InvMahalanobis(resi,cov_);
+                    
+                    row_jac = [2*(xc - xk), 2*(yc - yk), 2/kappa^3];
+                    obj.opt.ME_block(j,:) = InvMahalanobis(row_jac * obj.segments{i}.Cjac,cov_);
+                end
+
+                cnt = cnt + n;
+            end            
+            obj.opt.ME_block = sparse(obj.opt.ME_block);            
+        end
+
+        %% Create Intial, Last Point Measurement Jacobian
+        function obj = CreateMEBlock2(obj,x0)
+            obj.opt.ME_block2 = zeros(4,3+2*obj.num_seg);
+            obj.opt.ME_vec2 = zeros(4,1);
+            % Initial Point
+            cov1 = reshape(obj.cov(:,obj.intv(1)),2,2);
+%             cov1 = 1e-10 * eye(2);
+            obj.opt.ME_vec2(1:2) = InvMahalanobis(x0(1:2) - obj.LP(:,obj.intv(1)),cov1);
+            obj.opt.ME_block2(1:2,1:2) = InvMahalanobis(eye(2),cov1);
+
+            % Final Point
+%             cov2 = 1e-10 * eye(2);
+            cov2 = reshape(obj.cov(:,obj.intv(end)),2,2);
+            
+            kappas = x0(3+(1:2:2*obj.num_seg))';
+            Ls = x0(3+(2:2:2*obj.num_seg))';
+            alpha = x0(3) + kappas * Ls';
+
+            % compute residual
+            xc = obj.segments{end}.xc;
+            yc = obj.segments{end}.yc;
+            Z_pred = [xc + 1/kappas(end) * sin(alpha);
+                      yc - 1/kappas(end) * cos(alpha)];
+            
+            obj.opt.ME_vec2(3:4) = InvMahalanobis(Z_pred - obj.LP(:,obj.intv(end)),cov2);
+            % compute jacobian
+            base_jac = obj.segments{end}.Cjac(1:2,:);            
+            
+            add_jac = zeros(2,3+2*obj.num_seg);
+            add_jac(:,3) = [1/kappas(end) * cos(alpha);
+                            1/kappas(end) * sin(alpha)];
+            for i=1:obj.num_seg
+                if i~=obj.num_seg
+                    add_jac(:,3+2*i-1) = [Ls(i)/kappas(end) * cos(alpha);
+                                          Ls(i)/kappas(end) * sin(alpha)];
+                    add_jac(:,3+2*i) = [kappas(i)/kappas(end) * cos(alpha);
+                                        kappas(i)/kappas(end) * sin(alpha)];
+                else
+                    add_jac(:,3+2*i-1) = [Ls(i)/kappas(end) * cos(alpha) - 1/kappas(end)^2 * sin(alpha);
+                                          Ls(i)/kappas(end) * sin(alpha) + 1/kappas(end)^2 * cos(alpha)];
+                    add_jac(:,3+2*i) = [cos(alpha);
+                                        sin(alpha)];
+                end
+            end
+            
+            obj.opt.ME_block2(3:4,:) = InvMahalanobis(base_jac+add_jac,cov2);            
+        end
+
+        %% Merge
+        function obj = Merge(obj)
+            obj.opt.res = vertcat(obj.opt.ME_vec,...
+                                  obj.opt.ME_vec2);
+            obj.opt.jac = vertcat(obj.opt.ME_block,...
+                                  obj.opt.ME_block2);
+        end
+        
+        %% Plot results
+        function plotRes(obj)
+            m = length(obj.opt.segments);
+            figure(1); hold on; grid on; axis equal;
+            for i=1:m
+                xc = obj.opt.segments{i}.xc;
+                yc = obj.opt.segments{i}.yc;
+
+                lp = obj.opt.segments{i}.LP_points(:,1);
+                diff = lp - [xc;yc];
+                
+                
+                R = abs(1/obj.opt.segments{i}.kappa);
+%                 disp(diff'*diff - R^2)
+                th_init = obj.opt.segments{i}.th_init;
+                th_last = obj.opt.segments{i}.th_last;
+                th = linspace(th_init,th_last,1e3);
+
+                LPs = [xc + R * cos(th);
+                       yc + R * sin(th)];
+                init_point = obj.opt.segments{i}.init_point;
+                last_point = obj.opt.segments{i}.last_point;
+                point = [init_point last_point];
+
+                plot(LPs(1,:),LPs(2,:),'k--');
+                plot(obj.opt.segments{i}.LP_points(1,:),...
+                     obj.opt.segments{i}.LP_points(2,:),'r.')
+                plot(point(1,:),point(2,:),'bp');
+            end
+        end
+
     end
 end
 
 %% ===========================Functions===========================
-%% Classify Lane Points based on angles
-function segments = ClassifyLP(LP,init_segments,intvs)
-% Classify data points into several segments
-    segments = {};
-    n = length(init_segments);
-    LP_cpyd = [LP;intvs(1):intvs(end)];
-    for i=1:n
-        if i~=n
-            x = init_segments{i}.x;
-            y = init_segments{i}.y;
-            th_init = init_segments{i}.th_init;
-            th_last = init_segments{i}.th_last;
-            ths = atan2(LP_cpyd(2,:) - y, LP_cpyd(1,:) - x);
-    
-            ths_valididx = findInBetweenIdxs(ths,[th_init,th_last]);
-            LP_cpyd_valid = LP_cpyd(:,ths_valididx);
-            LP_cpyd(:,ths_valididx) = [];
-        end
-
-        seg = struct();
-        seg.num = i;
-        seg.LP_idxs = LP_cpyd_valid(3,:);
-        seg.LP_points = LP_cpyd_valid(1:2,:);
-        
-        segments = [segments {seg}];
-    end
-end
 
 %% Determine if angle is between boundary values
 function idxs = findInBetweenIdxs(vals,bnds)
     if bnds(1) > bnds(2)
         bnds = flip(bnds);
     end
-    
     idxs = false(1,length(vals));
     
     for i=1:length(vals)
-        if vals(i) >= bnds(1) && vals(i) < bnds(2)
+        if vals(i) >= bnds(1) && vals(i) <= bnds(2)
             idxs(i) = true;
         end
     end
+end
 
+%% De-normalizing Constraints
+function ER = InvMahalanobis(Xdiff, Cov)
+    % Inverse Mahalanobis Distance for converting NLS problem to LS 
+    n = size(Cov,1);
+    SIG = eye(n)/chol(Cov);
+    SIG = SIG';
+    ER = SIG * Xdiff;
 end
