@@ -15,17 +15,16 @@ classdef CircleFitV5 < handle
         num_seg % Number of target arc segments
         init_segments = {} % Initial arc segments
         opt = struct() % Optimized Results
-        segments = {} % Data points divided into segments
+        segments = {} % Data points divided into segments        
     end
 
     methods
         %% Constructor
-        function obj = CircleFitV5(LP,cov,thres,intv,num_seg)
+        function obj = CircleFitV5(LP,cov,thres,intv)
             obj.LP = LP(1:2,:);
             obj.cov = cov;
             obj.thres = thres;
-            obj.intv = intv; 
-            obj.num_seg = num_seg;
+            obj.intv = intv;             
         end
 
         %% Initialize
@@ -48,32 +47,87 @@ classdef CircleFitV5 < handle
             end
 
             % [Part 2: Create initial value segments]
-            % Using the interval and number of segments, divide data points
-            % and create initial segment data using "CircleFit.m" --> need
-            % to modify
-            init_intvs = floor(linspace(obj.intv(1),obj.intv(end),obj.num_seg+1));
-%             disp(init_intvs)
-
-            for i=1:obj.num_seg
-                % Modify CircleFit output format
-                % Need to calculate approximated arc_length and curvature
-                [res,~] = CircleFit(obj.LP(1,init_intvs(i):init_intvs(i+1))',...
-                                    obj.LP(2,init_intvs(i):init_intvs(i+1))',...
-                                    obj.w(init_intvs(i):init_intvs(i+1))',...
-                                    false);
-                res.bnds = [init_intvs(i) init_intvs(i+1)];
-                obj.init_segments = [obj.init_segments {res}];
-            end
+            % Incrementally perform circular fitting to find the minimum
+            % number of segments and their initial values
+            % Initial number of segments is determined by this process
+            
+            obj.findInitialSegments();                     
 
             % [Part 3: Create initial value for optimization]
             obj.opt.X0 = zeros(3+2*obj.num_seg,1);
-            obj.opt.X0(1:2) = obj.LP(:,init_intvs(1));
-            obj.opt.X0(3) = atan2(obj.LP(2,init_intvs(1)+1) - obj.LP(2,init_intvs(1)),...
-                                  obj.LP(1,init_intvs(1)+1) - obj.LP(1,init_intvs(1)));
+            obj.opt.X0(1:2) = obj.LP(:,obj.intv(1));
+            obj.opt.X0(3) = atan2(obj.LP(2,obj.intv(1)+1) - obj.LP(2,obj.intv(1)),...
+                                  obj.LP(1,obj.intv(1)+1) - obj.LP(1,obj.intv(1)));
             for i=1:obj.num_seg
                 obj.opt.X0(3+2*i-1:3+2*i) = [obj.init_segments{i}.kappa;
                                              obj.init_segments{i}.L];
             end
+            obj.opt.init_num_seg = obj.num_seg;
+            obj.opt.initX0 = obj.opt.X0;
+        end
+        
+        %% Find Initial Segments
+        function obj = findInitialSegments(obj)
+            % Starting from the index 1, incrementally find maximum
+            % possible length arc spline approximation
+            disp('=========[Initial Segmentization]=========');
+            lb = 1; 
+            % upper bound for search index will be found randomly first and
+            % will be decreased. This is to increase the searching
+            % efficiency of the maximum length accurate arc spline
+            % approximation. Upper bound index is set so that the maximum
+            % fitting error is between 5 ~ 10 m
+            n = size(obj.LP,2);
+            
+            cnt = 1;
+            obj.opt.init_intvs = lb;
+            base_delta = 1000;
+            while true
+                % Determine if current segment of interest is the last
+                % segment
+                
+                [res_,err_] = CircleFit(obj.LP(1,lb:n)',obj.LP(2,lb:n)',obj.w(lb:n)',obj.cov(:,lb:n),obj.thres,false);
+                if err_.valid
+                    res_.bnds = [lb n];
+                    obj.init_segments = [obj.init_segments {res_}];
+                    disp(['Segment ',num2str(cnt),' Index ',num2str(lb),'~',num2str(n)])
+                    obj.opt.init_intvs = [obj.opt.init_intvs n];
+                    break;
+                end
+                
+                max_err = 0;
+                % If not last segment, find upper bound
+                ub = lb;
+                while max_err < 3 
+                    
+                    ub = ub + base_delta; 
+                    
+                    if ub > n
+                        ub = n;
+                        break;
+                    end
+                    [~,err_] = CircleFit(obj.LP(1,lb:ub)',obj.LP(2,lb:ub)',obj.w(lb:ub)',obj.cov(:,lb:ub),obj.thres,false);
+                    max_err = err_.emax;
+
+                end
+                
+
+                validity = false;
+                while ~validity
+                    ub = ub - 1;
+                    [res_,err_] = CircleFit(obj.LP(1,lb:ub)',obj.LP(2,lb:ub)',obj.w(lb:ub)',obj.cov(:,lb:ub),obj.thres,false);
+                    validity = err_.valid;                    
+                end
+
+                res_.bnds = [lb ub];
+                obj.init_segments = [obj.init_segments {res_}];
+                disp(['Segment ',num2str(cnt),' Index ',num2str(lb),'~',num2str(ub)])
+                obj.opt.init_intvs = [obj.opt.init_intvs ub];
+                lb = ub;
+                cnt = cnt + 1;
+            end
+            disp('=========[Initial Segmentization Finished]=========');
+            obj.num_seg = cnt;
         end
 
         %% Optimize
@@ -82,59 +136,68 @@ classdef CircleFitV5 < handle
                                    'Display','iter-detailed','Algorithm','trust-region-reflective',...
                                    'UseParallel',true,'MaxFunctionEvaluations',inf,...
                                    'StepTolerance',1e-8,'MaxIterations',inf,'CheckGradients',false);
-            % Need to set lower bounds for arc lengths
-            lb1 = [-inf,-inf,-inf];
-            lb2 = [-inf 20];
-            lb = horzcat(lb1,repmat(lb2,1,obj.num_seg));
-            [obj.opt.fullx,~,obj.opt.res,~,~,~,obj.opt.jac] = lsqnonlin(@obj.cost_func,obj.opt.X0,lb,[],options);
-            
-            % Need to post process optimization results
-            obj.opt.segments = obj.segments;
-            m = length(obj.segments);
-            x0 = obj.opt.fullx(1); y0 = obj.opt.fullx(2); tau = obj.opt.fullx(3);
-            kappa = obj.opt.fullx(4); L = obj.opt.fullx(5);
 
-            xc = x0 - 1/kappa * sin(tau); yc = y0 + 1/kappa * cos(tau);
-            init_point = [x0; y0];
-            last_point = [xc + 1/kappa * sin(tau+kappa*L);
-                          yc - 1/kappa * cos(tau+kappa*L)];
-            obj.opt.segments{1}.xc = xc;
-            obj.opt.segments{1}.yc = yc;
-            obj.opt.segments{1}.kappa = kappa;
-            obj.opt.segments{1}.L = L;
-            obj.opt.segments{1}.init_point = init_point;
-            obj.opt.segments{1}.last_point = last_point;
-            obj.opt.segments{1}.th_init = atan2(init_point(2)-yc,init_point(1)-xc);
-            obj.opt.segments{1}.th_last = atan2(last_point(2)-yc,last_point(1)-xc);            
-            
-            for i=2:m                
+            obj.opt.valid = false;
+            fig_base = length(obj.opt.init_intvs)-1;            
+
+            while ~obj.opt.valid
+                % Need to set lower bounds for arc lengths
+                lb1 = [-inf,-inf,-inf];
+                lb2 = [-inf 20];
+                lb = horzcat(lb1,repmat(lb2,1,obj.num_seg));
                 
-                tau = tau + kappa * L;
-                xc = xc + 1/kappa * sin(tau);
-                yc = yc - 1/kappa * cos(tau);
-                kappa = obj.opt.fullx(3+2*i-1);
-
-                xc = xc - 1/kappa * sin(tau);
-                yc = yc + 1/kappa * cos(tau);
-                L = obj.opt.fullx(3+2*i);
-
-                init_point = last_point;
+                disp(['[Batch Optimization Starts, number of segments: ',num2str(obj.num_seg),']'])
+                [obj.opt.fullx,~,obj.opt.res,~,~,~,obj.opt.jac] = lsqnonlin(@obj.cost_func,obj.opt.X0,lb,[],options);
+                
+                % Post process optimization results to check validity of
+                % arc spline approximation
+                obj.opt.segments = obj.segments;
+                m = length(obj.segments);
+                x0 = obj.opt.fullx(1); y0 = obj.opt.fullx(2); tau = obj.opt.fullx(3);
+                kappa = obj.opt.fullx(4); L = obj.opt.fullx(5);
+    
+                xc = x0 - 1/kappa * sin(tau); yc = y0 + 1/kappa * cos(tau);
+                init_point = [x0; y0];
                 last_point = [xc + 1/kappa * sin(tau+kappa*L);
                               yc - 1/kappa * cos(tau+kappa*L)];
+                obj.opt.segments{1}.xc = xc;
+                obj.opt.segments{1}.yc = yc;
+                obj.opt.segments{1}.kappa = kappa;
+                obj.opt.segments{1}.L = L;
+                obj.opt.segments{1}.init_point = init_point;
+                obj.opt.segments{1}.last_point = last_point;
+                obj.opt.segments{1}.th_init = atan2(init_point(2)-yc,init_point(1)-xc);
+                obj.opt.segments{1}.th_last = atan2(last_point(2)-yc,last_point(1)-xc);            
                 
-                obj.opt.segments{i}.xc = xc;
-                obj.opt.segments{i}.yc = yc;
-                obj.opt.segments{i}.kappa = kappa;
-                obj.opt.segments{i}.L = L;
-                obj.opt.segments{i}.init_point = init_point;
-                obj.opt.segments{i}.last_point = last_point;
-                obj.opt.segments{i}.th_init = atan2(init_point(2)-yc,init_point(1)-xc);
-                obj.opt.segments{i}.th_last = atan2(last_point(2)-yc,last_point(1)-xc);
-            end
-            obj.computeError();
-
-            if obj.opt.valid
-                obj.plotRes();
+                for i=2:m                                   
+                    tau = tau + kappa * L;
+                    xc = xc + 1/kappa * sin(tau);
+                    yc = yc - 1/kappa * cos(tau);
+                    kappa = obj.opt.fullx(3+2*i-1);
+    
+                    xc = xc - 1/kappa * sin(tau);
+                    yc = yc + 1/kappa * cos(tau);
+                    L = obj.opt.fullx(3+2*i);
+    
+                    init_point = last_point;
+                    last_point = [xc + 1/kappa * sin(tau+kappa*L);
+                                  yc - 1/kappa * cos(tau+kappa*L)];
+                    
+                    obj.opt.segments{i}.xc = xc;
+                    obj.opt.segments{i}.yc = yc;
+                    obj.opt.segments{i}.kappa = kappa;
+                    obj.opt.segments{i}.L = L;
+                    obj.opt.segments{i}.init_point = init_point;
+                    obj.opt.segments{i}.last_point = last_point;
+                    obj.opt.segments{i}.th_init = atan2(init_point(2)-yc,init_point(1)-xc);
+                    obj.opt.segments{i}.th_last = atan2(last_point(2)-yc,last_point(1)-xc);
+                end
+                obj.computeError();    
+                obj.plotRes(floor(obj.num_seg - fig_base + 1));                
+                
+                if ~obj.opt.valid
+                    obj.createNewX0();                    
+                end
             end
         end
 
@@ -144,7 +207,7 @@ classdef CircleFitV5 < handle
             % [Part 1: Precompute parameter jacobians and calculate circle centers]
             obj.precompJac(x0);            
             % [Part 2: Divide data points using initial segment data]
-            obj.classifyLP();                  
+            obj.classifyLP(x0);                  
             % [Part 3: Compute full jacobian and residual]
             % Part 3-1: Normal Measurement Jacobian using chain rule
             obj.CreateMEBlock();
@@ -153,11 +216,7 @@ classdef CircleFitV5 < handle
 
             obj.Merge();
             res = obj.opt.res;
-            jac = obj.opt.jac;
-            
-            
-            obj.plotRes();
-            
+            jac = obj.opt.jac;                                 
         end
         
         %% Precompute Jacobians
@@ -267,28 +326,63 @@ classdef CircleFitV5 < handle
         end
 
         %% Classify Lane Points based on angles
-        function obj = classifyLP(obj)
+        function obj = classifyLP(obj,x0)
             n = length(obj.segments);
             LP_cpyd = [obj.LP(:,obj.intv(1):obj.intv(end)); 
                        obj.intv(1):obj.intv(end)];
-            for i=1:n
-                if i~=n
-                    x = obj.segments{i}.xc;
-                    y = obj.segments{i}.yc;
-                    th_init = obj.segments{i}.th_init;
-                    th_last = obj.segments{i}.th_last;
-                    ths = atan2(LP_cpyd(2,:) - y, LP_cpyd(1,:) - x);
-                    ths_valididx = findInBetweenIdxs(ths,[th_init,th_last]);
+            obj.opt.x0 = x0;
+            if obj.num_seg ~= obj.opt.init_num_seg
+                for i=1:n
+                    if i~=n
+                        x = obj.segments{i}.xc;
+                        y = obj.segments{i}.yc;
+                        th_init = obj.segments{i}.th_init;
+                        th_last = obj.segments{i}.th_last;
+                        ths = atan2(LP_cpyd(2,:) - y, LP_cpyd(1,:) - x);
+                        ths_valididx = findInBetweenIdxs(ths,[th_init,th_last]);
+                        
+                        LP_cpyd_valid = LP_cpyd(:,ths_valididx);
+                        LP_cpyd(:,ths_valididx) = [];
+                    else
+                        LP_cpyd_valid = LP_cpyd;
+                    end
                     
-                    LP_cpyd_valid = LP_cpyd(:,ths_valididx);
-                    LP_cpyd(:,ths_valididx) = [];
-                else
-                    LP_cpyd_valid = LP_cpyd;
+                    obj.segments{i}.num = i;
+                    obj.segments{i}.LP_idxs = LP_cpyd_valid(3,:);
+                    obj.segments{i}.LP_points = LP_cpyd_valid(1:2,:); 
                 end
-                
-                obj.segments{i}.num = i;
-                obj.segments{i}.LP_idxs = LP_cpyd_valid(3,:);
-                obj.segments{i}.LP_points = LP_cpyd_valid(1:2,:);                 
+            elseif norm(obj.opt.initX0 - x0) < 1e-4 % Numerical Error
+                for i=1:n
+                    bnds = obj.init_segments{i}.bnds;
+                    obj.segments{i}.num = i;
+                    if i == 1
+                        obj.segments{i}.LP_idxs = bnds(1):bnds(2);
+                        obj.segments{i}.LP_points = obj.LP(:,bnds(1):bnds(2));
+                    else
+                        obj.segments{i}.LP_idxs = (bnds(1)+1):bnds(2);
+                        obj.segments{i}.LP_points = obj.LP(:,(bnds(1)+1):bnds(2));
+                    end
+                end
+            else
+                for i=1:n
+                    if i~=n
+                        x = obj.segments{i}.xc;
+                        y = obj.segments{i}.yc;
+                        th_init = obj.segments{i}.th_init;
+                        th_last = obj.segments{i}.th_last;
+                        ths = atan2(LP_cpyd(2,:) - y, LP_cpyd(1,:) - x);
+                        ths_valididx = findInBetweenIdxs(ths,[th_init,th_last]);
+                        
+                        LP_cpyd_valid = LP_cpyd(:,ths_valididx);
+                        LP_cpyd(:,ths_valididx) = [];
+                    else
+                        LP_cpyd_valid = LP_cpyd;
+                    end
+                    
+                    obj.segments{i}.num = i;
+                    obj.segments{i}.LP_idxs = LP_cpyd_valid(3,:);
+                    obj.segments{i}.LP_points = LP_cpyd_valid(1:2,:); 
+                end
             end
         end
         
@@ -301,10 +395,13 @@ classdef CircleFitV5 < handle
             cnt = 0;
             for i=1:m
                 n = length(obj.segments{i}.LP_points);
+
                 xc = obj.segments{i}.xc;
                 yc = obj.segments{i}.yc;
                 kappa = obj.segments{i}.kappa;
-                
+%                 if n <= 1
+%                     disp([i n])
+%                 end
                 for j = cnt+1:cnt+n
                     LP_idx = obj.segments{i}.LP_idxs(j-cnt);
                     cov_ = obj.w(LP_idx);
@@ -320,12 +417,6 @@ classdef CircleFitV5 < handle
                         row_jac = [(xc - xk)/d, (yc - yk)/d, -1/kappa^2];
                     end
 
-%                     if j-cnt == 1 && i == 2
-%                         disp([j cnt i])
-%                         disp(row_jac(3))
-%                         
-% %                         disp(row_jac * obj.segments{i}.Cjac)
-%                     end
                     obj.opt.ME_block(j,:) = InvMahalanobis(row_jac * obj.segments{i}.Cjac,cov_);
                 end
 
@@ -340,12 +431,11 @@ classdef CircleFitV5 < handle
             obj.opt.ME_vec2 = zeros(4,1);
             % Initial Point
             cov1 = reshape(obj.cov(:,obj.intv(1)),2,2);
-%             cov1 = 1e-10 * eye(2);
+
             obj.opt.ME_vec2(1:2) = InvMahalanobis(x0(1:2) - obj.LP(:,obj.intv(1)),cov1);
             obj.opt.ME_block2(1:2,1:2) = InvMahalanobis(eye(2),cov1);
 
             % Final Point
-%             cov2 = 1e-10 * eye(2);
             cov2 = reshape(obj.cov(:,obj.intv(end)),2,2);
             
             kappas = x0(3+(1:2:2*obj.num_seg))';
@@ -444,77 +534,72 @@ classdef CircleFitV5 < handle
         end
 
         %% Plot results
-        function plotRes(obj)
+        function plotRes(obj,n)
             m = length(obj.segments);
-            figure(1); 
+            figure(n); hold on; grid on; axis equal;
             trig = false;
-%             for i=1:m
-%                 xc = obj.opt.segments{i}.xc;
-%                 yc = obj.opt.segments{i}.yc;                               
-%                 
-%                 R = abs(1/obj.opt.segments{i}.kappa);
-%                 th_init = obj.opt.segments{i}.th_init;
-%                 th_last = obj.opt.segments{i}.th_last;
-%                 th = linspace(th_init,th_last,1e3);
-% 
-%                 LPs = [xc + R * cos(th);
-%                        yc + R * sin(th)];
-%                 init_point = obj.opt.segments{i}.init_point;
-%                 last_point = obj.opt.segments{i}.last_point;
-%                 point = [init_point last_point];
-% 
-%                 p_approx = plot(LPs(1,:),LPs(2,:),'k--');
-%                 p_data = plot(obj.opt.segments{i}.LP_points(1,:),...
-%                               obj.opt.segments{i}.LP_points(2,:),'r.');
-%                 p_cts = plot(point(1,:),point(2,:),'bp');
-% 
-%                 if ~isempty(obj.opt.err{i}.invalid_idxs)
-%                     idxs = obj.opt.err{i}.invalid_idxs;
-%                     p_vio = plot(obj.opt.segments{i}.LP_points(1,idxs),...
-%                                  obj.opt.segments{i}.LP_points(2,idxs),'cs');
-%                     trig = true;
-%                 end                
-%             end
             for i=1:m
-                xc = obj.segments{i}.xc;
-                yc = obj.segments{i}.yc;                               
+                xc = obj.opt.segments{i}.xc;
+                yc = obj.opt.segments{i}.yc;                               
                 
-                R = abs(1/obj.segments{i}.kappa);
-                th_init = obj.segments{i}.th_init;
-                th_last = obj.segments{i}.th_last;
+                R = abs(1/obj.opt.segments{i}.kappa);
+                th_init = obj.opt.segments{i}.th_init;
+                th_last = obj.opt.segments{i}.th_last;
                 th = linspace(th_init,th_last,1e3);
 
                 LPs = [xc + R * cos(th);
                        yc + R * sin(th)];
-                init_point = obj.segments{i}.init_point;
-                last_point = obj.segments{i}.last_point;
+                init_point = obj.opt.segments{i}.init_point;
+                last_point = obj.opt.segments{i}.last_point;
                 point = [init_point last_point];
 
-                p_approx = plot(LPs(1,:),LPs(2,:),'k--'); hold on; grid on; axis equal;
-                p_data = plot(obj.segments{i}.LP_points(1,:),...
-                              obj.segments{i}.LP_points(2,:),'r.');
+                p_approx = plot(LPs(1,:),LPs(2,:),'k--');
+                p_data = plot(obj.opt.segments{i}.LP_points(1,:),...
+                              obj.opt.segments{i}.LP_points(2,:),'r.');
                 p_cts = plot(point(1,:),point(2,:),'bp');
 
-                
+                if ~isempty(obj.opt.err{i}.invalid_idxs)
+                    idxs = obj.opt.err{i}.invalid_idxs;
+                    p_vio = plot(obj.opt.segments{i}.LP_points(1,idxs),...
+                                 obj.opt.segments{i}.LP_points(2,idxs),'cs');
+                    trig = true;
+                end                
             end
+            
 
             xlabel('Global X'); ylabel('Global Y'); 
-            title('Batch Arc Spline Fitting');
+            title(['Batch Arc Spline Fitting using ',num2str(obj.num_seg),' segments']);
             
-%             if trig
-%                 legend([p_approx,p_data,p_cts,p_vio],...
-%                         'Piecewise Arc Splines','Data Points',...
-%                         'Control Points','Threshold Violated Points')
-%             else
-%                 legend([p_approx,p_data,p_cts],...
-%                         'Piecewise Arc Splines','Data Points',...
-%                         'Control Points')
-%             end
-            legend([p_approx,p_data,p_cts],...
-                    'Piecewise Arc Splines','Data Points',...
-                    'Control Points')
-
-            hold off;
+            if trig
+                legend([p_approx,p_data,p_cts,p_vio],...
+                        'Piecewise Arc Splines','Data Points',...
+                        'Control Points','Threshold Violated Points')
+            else
+                legend([p_approx,p_data,p_cts],...
+                        'Piecewise Arc Splines','Data Points',...
+                        'Control Points')
+            end                        
+        end
+        
+        %% Create New X0 (initial value) for introducing new segment
+        function obj = createNewX0(obj)
+            n = length(obj.opt.segments);
+            % Initial Point and initial heading angle is set equal
+            
+            x0 = [];
+            invalid_cnt = 0;
+            for i=1:n
+                if ~obj.opt.err{i}.valid % Current Segment is not valid
+                    x0 = [x0; obj.opt.segments{i}.kappa; 1/2 * obj.opt.segments{i}.L;
+                              obj.opt.segments{i}.kappa; 1/2 * obj.opt.segments{i}.L];    
+                    invalid_cnt = invalid_cnt + 1;
+                else
+                    x0 = [x0; obj.opt.segments{i}.kappa; obj.opt.segments{i}.L];
+                end
+            end
+            
+            obj.opt.X0 = [obj.opt.fullx(1:3); x0];  
+            obj.num_seg = obj.num_seg + invalid_cnt;
         end
 
     end
