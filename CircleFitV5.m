@@ -53,6 +53,7 @@ classdef CircleFitV5 < handle
             % to modify
             init_intvs = floor(linspace(obj.intv(1),obj.intv(end),obj.num_seg+1));
 %             disp(init_intvs)
+
             for i=1:obj.num_seg
                 % Modify CircleFit output format
                 % Need to calculate approximated arc_length and curvature
@@ -79,7 +80,8 @@ classdef CircleFitV5 < handle
         function obj = optimize(obj)
             options = optimoptions('lsqnonlin','SpecifyObjectiveGradient',false,...
                                    'Display','iter-detailed','Algorithm','trust-region-reflective',...
-                                   'UseParallel',true,'MaxFunctionEvaluations',inf,'StepTolerance',1e-9);
+                                   'UseParallel',true,'MaxFunctionEvaluations',inf,...
+                                   'StepTolerance',1e-8,'MaxIterations',inf,'CheckGradients',false);
             % Need to set lower bounds for arc lengths
             lb1 = [-inf,-inf,-inf];
             lb2 = [-inf 20];
@@ -129,8 +131,11 @@ classdef CircleFitV5 < handle
                 obj.opt.segments{i}.th_init = atan2(init_point(2)-yc,init_point(1)-xc);
                 obj.opt.segments{i}.th_last = atan2(last_point(2)-yc,last_point(1)-xc);
             end
+            obj.computeError();
 
-            obj.plotRes();
+            if obj.opt.valid
+                obj.plotRes();
+            end
         end
 
         %% Cost Function
@@ -149,6 +154,10 @@ classdef CircleFitV5 < handle
             obj.Merge();
             res = obj.opt.res;
             jac = obj.opt.jac;
+            
+            
+            obj.plotRes();
+            
         end
         
         %% Precompute Jacobians
@@ -192,8 +201,11 @@ classdef CircleFitV5 < handle
                         delta_jac(1,3+2*j-1) = Lj/kappa * cos(tau);
                         delta_jac(2,3+2*j-1) = Lj/kappa * sin(tau);                        
                     end
-                    delta_jac(1,3+2*j) = kappaj/kappa * cos(tau);
-                    delta_jac(2,3+2*j) = kappaj/kappa * sin(tau);
+
+                    if j~=i
+                        delta_jac(1,3+2*j) = kappaj/kappa * cos(tau);
+                        delta_jac(2,3+2*j) = kappaj/kappa * sin(tau);
+                    end
                 end
 
                 kappa = x0(3+2*i-1); % Ki --> Ki+1
@@ -218,8 +230,11 @@ classdef CircleFitV5 < handle
                         delta_jac(1,3+2*j-1) = delta_jac(1,3+2*j-1) - Lj/kappa * cos(tau);
                         delta_jac(2,3+2*j-1) = delta_jac(2,3+2*j-1) - Lj/kappa * sin(tau);                        
                     end
-                    delta_jac(1,3+2*j) = delta_jac(1,3+2*j) - kappaj/kappa * cos(tau);
-                    delta_jac(2,3+2*j) = delta_jac(2,3+2*j) - kappaj/kappa * sin(tau);
+
+                    if j~=i
+                        delta_jac(1,3+2*j) = delta_jac(1,3+2*j) - kappaj/kappa * cos(tau);
+                        delta_jac(2,3+2*j) = delta_jac(2,3+2*j) - kappaj/kappa * sin(tau);
+                    end
                 end
 
                 jac_ = jac_ + delta_jac;
@@ -293,13 +308,24 @@ classdef CircleFitV5 < handle
                 for j = cnt+1:cnt+n
                     LP_idx = obj.segments{i}.LP_idxs(j-cnt);
                     cov_ = obj.w(LP_idx);
-%                     cov_ = 1;
                     xk = obj.segments{i}.LP_points(1,j-cnt);
                     yk = obj.segments{i}.LP_points(2,j-cnt);
-                    resi = sqrt((xc - xk)^2 + (yc - yk)^2) - abs(1/kappa);
+                    d = sqrt((xc - xk)^2 + (yc - yk)^2);
+                    resi = d - abs(1/kappa);
                     obj.opt.ME_vec(j) = InvMahalanobis(resi,cov_);
                     
-                    row_jac = [2*(xc - xk), 2*(yc - yk), 2/kappa^3];
+                    if kappa >= 0
+                        row_jac = [(xc - xk)/d, (yc - yk)/d, 1/kappa^2];
+                    else
+                        row_jac = [(xc - xk)/d, (yc - yk)/d, -1/kappa^2];
+                    end
+
+%                     if j-cnt == 1 && i == 2
+%                         disp([j cnt i])
+%                         disp(row_jac(3))
+%                         
+% %                         disp(row_jac * obj.segments{i}.Cjac)
+%                     end
                     obj.opt.ME_block(j,:) = InvMahalanobis(row_jac * obj.segments{i}.Cjac,cov_);
                 end
 
@@ -364,35 +390,131 @@ classdef CircleFitV5 < handle
                                   obj.opt.ME_block2);
         end
         
-        %% Plot results
-        function plotRes(obj)
+        %% Compute Error for every segment
+        function obj = computeError(obj)
             m = length(obj.opt.segments);
-            figure(1); hold on; grid on; axis equal;
-            for i=1:m
+            obj.opt.valid = true;
+            obj.opt.err = {};
+
+            disp('Error Analysis')
+            for i=1:m                
+                err_ = struct();
+                n = length(obj.opt.segments{i}.LP_idxs);
+                err_.full = zeros(1,n);
+                
+                err_.wfull = zeros(1,n);
+                err_.wthres = sqrt(chi2inv(obj.thres,2));
+                err_.invalid_idxs = [];
+                
                 xc = obj.opt.segments{i}.xc;
                 yc = obj.opt.segments{i}.yc;
-
-                lp = obj.opt.segments{i}.LP_points(:,1);
-                diff = lp - [xc;yc];
-                
-                
                 R = abs(1/obj.opt.segments{i}.kappa);
-%                 disp(diff'*diff - R^2)
-                th_init = obj.opt.segments{i}.th_init;
-                th_last = obj.opt.segments{i}.th_last;
+                
+                cnt = 0;
+                for j=1:n
+                    lp_idx = obj.opt.segments{i}.LP_idxs(j);
+                    lp = obj.opt.segments{i}.LP_points(:,j);
+                    th = atan2(lp(2)-yc,lp(1)-xc);
+                    lp_pred = [xc + R * cos(th);
+                               yc + R * sin(th)];
+                    diff = lp_pred - lp;
+                    cov_ = reshape(obj.cov(:,lp_idx),2,2);
+                    err_.full(j) = sqrt(diff' * diff);
+                    err_.wfull(j) = sqrt(diff' / cov_ * diff);
+                    
+                    if err_.wfull(j) > err_.wthres
+                        cnt = cnt + 1;
+                        err_.invalid_idxs = [err_.invalid_idxs j];
+                    end
+                end
+                err_.emax = max(err_.full);
+                
+                if cnt < 3
+                    disp(['Segment ',num2str(i),': Valid, Maximum Error: ',num2str(err_.emax)])
+                    err_.valid = true;
+                else
+                    
+                    disp(['Segment ',num2str(i),': Invalid, Maximum Error: ',num2str(err_.emax)])
+                    err_.valid = false;
+                    obj.opt.valid = false;
+                end
+
+                obj.opt.err = [obj.opt.err {err_}];
+            end
+        end
+
+        %% Plot results
+        function plotRes(obj)
+            m = length(obj.segments);
+            figure(1); 
+            trig = false;
+%             for i=1:m
+%                 xc = obj.opt.segments{i}.xc;
+%                 yc = obj.opt.segments{i}.yc;                               
+%                 
+%                 R = abs(1/obj.opt.segments{i}.kappa);
+%                 th_init = obj.opt.segments{i}.th_init;
+%                 th_last = obj.opt.segments{i}.th_last;
+%                 th = linspace(th_init,th_last,1e3);
+% 
+%                 LPs = [xc + R * cos(th);
+%                        yc + R * sin(th)];
+%                 init_point = obj.opt.segments{i}.init_point;
+%                 last_point = obj.opt.segments{i}.last_point;
+%                 point = [init_point last_point];
+% 
+%                 p_approx = plot(LPs(1,:),LPs(2,:),'k--');
+%                 p_data = plot(obj.opt.segments{i}.LP_points(1,:),...
+%                               obj.opt.segments{i}.LP_points(2,:),'r.');
+%                 p_cts = plot(point(1,:),point(2,:),'bp');
+% 
+%                 if ~isempty(obj.opt.err{i}.invalid_idxs)
+%                     idxs = obj.opt.err{i}.invalid_idxs;
+%                     p_vio = plot(obj.opt.segments{i}.LP_points(1,idxs),...
+%                                  obj.opt.segments{i}.LP_points(2,idxs),'cs');
+%                     trig = true;
+%                 end                
+%             end
+            for i=1:m
+                xc = obj.segments{i}.xc;
+                yc = obj.segments{i}.yc;                               
+                
+                R = abs(1/obj.segments{i}.kappa);
+                th_init = obj.segments{i}.th_init;
+                th_last = obj.segments{i}.th_last;
                 th = linspace(th_init,th_last,1e3);
 
                 LPs = [xc + R * cos(th);
                        yc + R * sin(th)];
-                init_point = obj.opt.segments{i}.init_point;
-                last_point = obj.opt.segments{i}.last_point;
+                init_point = obj.segments{i}.init_point;
+                last_point = obj.segments{i}.last_point;
                 point = [init_point last_point];
 
-                plot(LPs(1,:),LPs(2,:),'k--');
-                plot(obj.opt.segments{i}.LP_points(1,:),...
-                     obj.opt.segments{i}.LP_points(2,:),'r.')
-                plot(point(1,:),point(2,:),'bp');
+                p_approx = plot(LPs(1,:),LPs(2,:),'k--'); hold on; grid on; axis equal;
+                p_data = plot(obj.segments{i}.LP_points(1,:),...
+                              obj.segments{i}.LP_points(2,:),'r.');
+                p_cts = plot(point(1,:),point(2,:),'bp');
+
+                
             end
+
+            xlabel('Global X'); ylabel('Global Y'); 
+            title('Batch Arc Spline Fitting');
+            
+%             if trig
+%                 legend([p_approx,p_data,p_cts,p_vio],...
+%                         'Piecewise Arc Splines','Data Points',...
+%                         'Control Points','Threshold Violated Points')
+%             else
+%                 legend([p_approx,p_data,p_cts],...
+%                         'Piecewise Arc Splines','Data Points',...
+%                         'Control Points')
+%             end
+            legend([p_approx,p_data,p_cts],...
+                    'Piecewise Arc Splines','Data Points',...
+                    'Control Points')
+
+            hold off;
         end
 
     end
