@@ -5,13 +5,18 @@ classdef Optimizer_LinV4 < handle
 % for stable optimization
 % [Optimization Step]
 % 1. INS propagation for initial value creation
-% 2. Data Association (Finding maximum k)
-% 3. NLS Optimization (Using lsqnonlin.m), converge with fixed data
-% association from step 2
-% 4. Compare residual norm with previous NLS optimization result 
+% * For "full", recommended to used optimized results from "INS + GNSS + WSS"
+% 2. Keyframe selection procedure based on lane curvature extraction
+% 3. Data Association (Finding maximum k)
+% 4. NLS Optimization (Using lsqnonlin.m), converge with fixed data
+% association from step 3
+% * For keyframes, perform full measurement using association matrices
+% calculated at step 3.
+% * For Non-keyframes, perform measurement only with precomputed maximum k
+% 5. Compare residual norm with previous NLS optimization result 
 % (If initial, previous optimized residual norm is set to inf).
 % If difference in residual norm is smaller than certain threshold,
-% stop. Else, increase counter and go to step 2. Stop also if counter goes
+% stop. Else, increase counter and go to step 3. Stop also if counter goes
 % over maximum iteration limit.
 %
 % Implemented by JinHwan Jeon, 2022
@@ -1362,41 +1367,40 @@ function [pc_re_l, pc_re_r, cov_re_l, cov_re_r, left_idxs] = sortLP(pc_l, pc_r, 
         cov_re_r = [cov_re_r covs_r(:,search_idx)];
     end
 
-    left_pc_l = pc_lcpyd; 
-%     left_pc_r = pc_rcpyd;
-%     left_cov_l = cov_lcpyd; left_cov_r = cov_rcpyd;
+    left_pc_l = pc_lcpyd; left_pc_r = pc_rcpyd;
+    left_cov_l = cov_lcpyd; left_cov_r = cov_rcpyd;
     disp(['Number of left out points at Phase 1: ',num2str(size(left_pc_l,2))])
     for i=1:size(left_pc_l,2)
         disp(['Left out index ',num2str(i),' : ',num2str(left_pc_l(3,i))])
     end
     left_idxs = left_pc_l(3,:);
 
-    % Phase 2: Fill in left points : Remove for stability
-%     disp('[Phase2: Fill in left out points]')
-%     n = size(left_pc_l,2);
-%     for i=1:n
-%         px_l = left_pc_l(1,i); py_l = left_pc_l(2,i);
-%         px_r = left_pc_r(1,i); py_r = left_pc_r(2,i);
-% 
-%         d = (pc_re_l(1,:) - px_l).^2 + (pc_re_l(2,:) - py_l).^2 + ...
-%             (pc_re_r(1,:) - px_r).^2 + (pc_re_l(2,:) - py_r).^2;
-%         [~,idx] = min(d);
-% 
-%         if d(idx-1) > d(idx+1)
-%             pc_re_l = horzcat(pc_re_l(:,1:idx), left_pc_l(:,i), pc_re_l(:,idx+1:end));
-%             pc_re_r = horzcat(pc_re_r(:,1:idx), left_pc_r(:,i), pc_re_r(:,idx+1:end));
-%             cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
-%             cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
-%         else
-%             pc_re_l = horzcat(pc_re_l(:,1:idx-1), left_pc_l(:,i), pc_re_l(:,idx:end));
-%             pc_re_r = horzcat(pc_re_r(:,1:idx-1), left_pc_r(:,i), pc_re_r(:,idx:end));
-%             cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
-%             cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
-%         end
-%     end
-%     for i=1:length(left_idxs)
-%         left_idxs(i) = find(pc_re_l(3,:) == left_idxs(i));
-%     end
+    % Phase 2: Fill in left points 
+    disp('[Phase2: Fill in left out points]')
+    n = size(left_pc_l,2);
+    for i=1:n
+        px_l = left_pc_l(1,i); py_l = left_pc_l(2,i);
+        px_r = left_pc_r(1,i); py_r = left_pc_r(2,i);
+
+        d = (pc_re_l(1,:) - px_l).^2 + (pc_re_l(2,:) - py_l).^2 + ...
+            (pc_re_r(1,:) - px_r).^2 + (pc_re_l(2,:) - py_r).^2;
+        [~,idx] = min(d);
+
+        if d(idx-1) > d(idx+1)
+            pc_re_l = horzcat(pc_re_l(:,1:idx), left_pc_l(:,i), pc_re_l(:,idx+1:end));
+            pc_re_r = horzcat(pc_re_r(:,1:idx), left_pc_r(:,i), pc_re_r(:,idx+1:end));
+            cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
+            cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
+        else
+            pc_re_l = horzcat(pc_re_l(:,1:idx-1), left_pc_l(:,i), pc_re_l(:,idx:end));
+            pc_re_r = horzcat(pc_re_r(:,1:idx-1), left_pc_r(:,i), pc_re_r(:,idx:end));
+            cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
+            cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
+        end
+    end
+    for i=1:length(left_idxs)
+        left_idxs(i) = find(pc_re_l(3,:) == left_idxs(i));
+    end
 
     % Phase 3: Perform Circular Fitting and finish re-ordering
 %     disp('Phase 3: Perform Circular Fitting to accurately order points')
