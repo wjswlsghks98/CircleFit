@@ -32,6 +32,7 @@ classdef Optimizer_LinV4 < handle
         mode % Sensor Fusion Mode: 'full','partial'   
         plot_flag % Flag for automatic result plot
         partial % INS + GNSS + INS Fusion Results
+        ins_flag % Start with INS?
     end
     methods
         %% Constructor
@@ -45,16 +46,18 @@ classdef Optimizer_LinV4 < handle
             
             obj.mode = varargin{6};
             obj.plot_flag = varargin{7};
-            
+            obj.ins_flag = varargin{8};
             if strcmp(obj.mode,'full')
-                obj.partial = varargin{8};
+                obj.partial = varargin{9};
+            else
+                error('Use Optimizer_LinV4 only for full mode')
             end
 
             dstart = obj.dstart;
             dend = obj.dend;            
             lane = obj.lane;
             
-            if strcmp(obj.mode,'partial')
+            if obj.ins_flag
                 obj.ins.dstart = dstart;
                 obj.ins.dend = dend;
                 obj.ins.iter = dstart;
@@ -67,12 +70,11 @@ classdef Optimizer_LinV4 < handle
                 obj.ins.state_saver = zeros(size(obj.ins.state,1),dend-dstart+1);
                 obj.ins.state_saver(:,1) = obj.ins.state;                       
             
-                
-                
-            elseif strcmp(obj.mode,'full')
+            else
                 % For fast convergence, "partial" result is used.
                 % This way, the optimization starts with much better
-                % quality of data association
+                % quality of data association, but may end up in the
+                % unwanted sub-optimal point
                 obj.ins = obj.partial.ins;
             end
             obj.opt.lb = []; obj.opt.ub = [];
@@ -89,11 +91,36 @@ classdef Optimizer_LinV4 < handle
             obj.INS();
             % Pre-process GNSS 
             obj.GNSS();
+            
+            % Keyframe selection based on lane curvature extraction
+            obj.keyFrameSelection();
+
+            % Pre-process data association
+            [~,n] = size(obj.ins.state_saver);
+            lml = zeros(2*n,obj.prev_num); lmr = lml;
+            for i=1:n
+                if obj.ins_flag
+                    Xi = obj.ins.state_saver(:,i);
+                else
+                    Xi = obj.partial.opt.states(:,i);
+                end
+                
+                for j=1:obj.prev_num
+                    lml(2*i-1:2*i,j) = getLP(Xi,obj.output.cam.l_inter(obj.dstart+i-1,j),j);
+                    lmr(2*i-1:2*i,j) = getLP(Xi,obj.output.cam.r_inter(obj.dstart+i-1,j),j);
+                end
+            end
+
+            if obj.ins_flag
+                obj.PreProcessing(obj.ins.state_saver,lml,lmr);
+            else
+                obj.PreProcessing(obj.partial.opt.states,lml,lmr);
+            end                
         end
         
         %% INS Mechanization
         function obj = INS(obj)
-            if strcmp(obj.mode,'partial')
+            if obj.ins_flag
                 disp('-INS Mechanization-')
                 % INS Mechanization Loop
                 while obj.ins.iter < obj.ins.dend
@@ -106,26 +133,19 @@ classdef Optimizer_LinV4 < handle
                     cnt = obj.ins.iter - obj.dstart + 1;
                     obj.ins.state_saver(:,cnt) = obj.ins.state;                
                 end
-            end                            
-    
-            % Merging vehicle states and lane points to create intial guess
-            if strcmp(obj.mode,'full')
-                % merge INS Mechanization results to create x0 (intial guess)
-%                 obj.x0 = vertcat(1, reshape(obj.ins.state_saver,[],1), ...
-%                                  reshape(obj.output.cam.l_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1), ...
-%                                  reshape(obj.output.cam.r_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1));
-            
+                
+                % Merging vehicle states and lane points to create intial guess
                 % 1 is wheel speed sensor scale factor initial value
-
-                % Merge "partial" optimization results
-                obj.x0 = vertcat(obj.partial.opt.x, ...
-                                 reshape(obj.output.cam.l_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1), ...
-                                 reshape(obj.output.cam.r_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1));
-            elseif strcmp(obj.mode,'partial')
-                obj.x0 = vertcat(1, reshape(obj.ins.state_saver,[],1));            
+                obj.opt.x0 = vertcat(1, reshape(obj.ins.state_saver,[],1), ...
+                                     reshape(obj.output.cam.l_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1), ...
+                                     reshape(obj.output.cam.r_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1));
             else
-                error('Options other than full, partial is not supported')
-            end            
+                % If optimization starts from "INS + GNSS + WSS" optimized
+                % result, vertically concantenate with lane prior guesses
+                obj.opt.x0 = vertcat(obj.partial.opt.x, ...
+                                     reshape(obj.output.cam.l_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1), ...
+                                     reshape(obj.output.cam.r_inter(obj.dstart:obj.dend,1:obj.prev_num)',[],1));
+            end
         end
 
         %% Pre-process GNSS measurements
@@ -177,70 +197,195 @@ classdef Optimizer_LinV4 < handle
             obj.gnss.meas = [x_valid(obj.gnss.lb:obj.gnss.ub);
                              y_valid(obj.gnss.lb:obj.gnss.ub);
                              z_valid(obj.gnss.lb:obj.gnss.ub)];
-            figure(14); hold on; grid on; axis equal;
-            for i=1:length(obj.gnss.idxs)
-                gt = [obj.lane.posx(obj.gnss.idxs(i));
-                      obj.lane.posy(obj.gnss.idxs(i))];
-                ublx = obj.gnss.meas(1:2,i);
-
-                pts = [gt ublx];
-                plot(pts(1,:),pts(2,:));
-                plot(gt(1),gt(2),'rx',ublx(1),ublx(2),'bx');
+%             figure(14); hold on; grid on; axis equal;
+%             for i=1:length(obj.gnss.idxs)
+%                 gt = [obj.lane.posx(obj.gnss.idxs(i));
+%                       obj.lane.posy(obj.gnss.idxs(i))];
+%                 ublx = obj.gnss.meas(1:2,i);
+% 
+%                 pts = [gt ublx];
+%                 plot(pts(1,:),pts(2,:),'k--');
+%                 plot(gt(1),gt(2),'rx',ublx(1),ublx(2),'bx');
+%                 
+%             end
+            
+        end
+        
+        %% Perform Keyframe selection based on lane curvature extraction
+        function obj = keyFrameSelection(obj)
+            disp('-Keyframe selection based on lane curvature extraction-')
+            [~,n] = size(obj.ins.state_saver);
+             
+            % Select a certain frame as a keyframe if extracted lane curve
+            % radius is smaller than threshold
+            rad_thres = 2e3;
+            x = [0 10 20]; % Test with first 3 preview points            
+           
+            keyframeIdxs = [];
+            % Compute Keyframe candidates (Forward)
+            for i=1:n
                 
+                ly = obj.output.cam.l_inter(obj.dstart+i-1,1:3);          
+                ry = obj.output.cam.r_inter(obj.dstart+i-1,1:3);                
+                
+                R_l = fitCircle(x,ly); R_r = fitCircle(x,ry);                
+
+                if R_l < rad_thres || R_r < rad_thres                                      
+                    keyframeIdxs = [keyframeIdxs i];
+                end
             end
-            error('1')
+            
+            % Last timestep must be added to keyframe for stability
+            if ~ismember(keyframeIdxs,n)
+                keyframeIdxs = [keyframeIdxs n];
+            end
+
+            % Remove too closely chosen candidates (Backward)
+            curr_idx = length(keyframeIdxs);
+            obj.opt.keyframeIdxs = [keyframeIdxs(curr_idx)];
+            spacing = 10; % minimum spacing: tuning variable
+            while curr_idx ~= 1
+                cnt = 1;
+                while keyframeIdxs(curr_idx-cnt) > keyframeIdxs(curr_idx) - spacing
+                    cnt = cnt + 1;
+                    if curr_idx-cnt < 1
+                        break;
+                    end
+                end
+
+                if curr_idx - cnt < 1
+                    break;
+                else
+                    obj.opt.keyframeIdxs = [obj.opt.keyframeIdxs keyframeIdxs(curr_idx-cnt)];
+                    curr_idx = curr_idx - cnt;
+                end
+
+            end
+            obj.opt.keyframeIdxs = sort(obj.opt.keyframeIdxs);
         end
 
         %% Optimization via Solving Non-linear Least Squares
         function obj = optimize(obj)
             disp('-Batch Optimization-')
             disp(['-Current Mode: ',obj.mode,'-'])
-
-            obj.opt.x = lsqnonlin(@obj.cost_func, obj.x0, obj.opt.lb, obj.opt.ub, obj.opt.options);
             
-            [m,n] = size(obj.ins.state_saver);
-
-            obj.opt.wsf = obj.opt.x(1);
-            obj.opt.states = reshape(obj.opt.x(2:m*n+1),m,n);
-
-            if strcmp(obj.mode,'full') 
-                obj.opt.latL = reshape(obj.opt.x(1+m*n+1:1+m*n+n*obj.prev_num),obj.prev_num,n)';
-                obj.opt.latR = reshape(obj.opt.x(1+m*n+n*obj.prev_num+1:end),obj.prev_num,n)';
-                % need to convert 1D lateral distance data to 2D Lane Point
-                % data
-                obj.opt.lml = zeros(2*n,obj.prev_num);
-                obj.opt.lmr = obj.opt.lml;
-                for i=1:n
-                    Xi = obj.opt.states(:,i);
-                    for j=1:obj.prev_num
-                        obj.opt.lml(2*i-1:2*i,j) = getLP(Xi,obj.opt.latL(i,j),j);
-                        obj.opt.lmr(2*i-1:2*i,j) = getLP(Xi,obj.opt.latR(i,j),j);
-                    end
+            max_iter = 10; %  Maximum iteration number of repetitive optimization 
+            resnorm_tol = 10; % Tolerance limit for optimization residual norm difference
+            resnorm_diff = inf;
+            prev_resnorm = inf;
+            
+            obj.opt.iter = 1;
+            while resnorm_diff > resnorm_tol
+                disp(['[Batch Iteration No. ',num2str(obj.opt.iter),']'])
+                % Using pre-computed association index matrix, compute the
+                % height of measurement jacobian
+                obj.blkHeight(); 
+                [obj.opt.x,curr_resnorm] = lsqnonlin(@obj.cost_func, obj.opt.x0, obj.opt.lb, obj.opt.ub, obj.opt.options);
+                
+                [m,n] = size(obj.ins.state_saver);
+    
+                obj.opt.wsf = obj.opt.x(1);
+                obj.opt.states = reshape(obj.opt.x(2:m*n+1),m,n);
+    
+                if strcmp(obj.mode,'full') 
+                    obj.opt.latL = reshape(obj.opt.x(1+m*n+1:1+m*n+n*obj.prev_num),obj.prev_num,n)';
+                    obj.opt.latR = reshape(obj.opt.x(1+m*n+n*obj.prev_num+1:end),obj.prev_num,n)';
+                    % need to convert 1D lateral distance data to 2D Lane Point
+                    % data
+                    obj.opt.lml = zeros(2*n,obj.prev_num);
+                    obj.opt.lmr = obj.opt.lml;
+                    for i=1:n
+                        Xi = obj.opt.states(:,i);
+                        for j=1:obj.prev_num
+                            obj.opt.lml(2*i-1:2*i,j) = getLP(Xi,obj.opt.latL(i,j),j);
+                            obj.opt.lmr(2*i-1:2*i,j) = getLP(Xi,obj.opt.latR(i,j),j);
+                        end
+                    end             
                 end
-%                 obj.reorderLP();
-            end
-            
-            obj.computeError();
+                
+                obj.computeError();
+                
+                resnorm_diff = abs(curr_resnorm - prev_resnorm);
+                disp(['[Batch Iteration No.',num2str(obj.opt.iter),...
+                      ' residual norm difference, ',num2str(resnorm_diff),']'])
 
-            obj.opt.info_mat = obj.opt.jac' * obj.opt.jac;
+                if resnorm_diff > resnorm_tol && obj.opt.iter < max_iter
+                    % Perform data association again and repeat batch
+                    % optimization
+                    prev_resnorm = curr_resnorm;
+                    obj.opt.x0 = obj.opt.x;
+                    obj.opt.iter = obj.opt.iter + 1;
+                    obj.PreProcessing(obj.opt.states,obj.opt.lml,obj.opt.lmr); 
+
+                elseif resnorm_diff < resnorm_tol
+                    disp(['Current residual norm difference: ',num2str(resnorm_diff),...
+                           '. Below current threshold of ',num2str(resnorm_tol),...
+                           '. Ending optimization'])
+                elseif obj.opt.iter >= max_iter
+                    disp(['Maximum iteration number ',num2str(max_iter),...
+                          ' exceeded, ending optimization'])
+                end                
+            end                      
             
-            % Covariance Extraction using SuiteSparse Toolbox
-            % Need to include for citation in paper
-            
-%             disp('-Recovering Covariance using SuiteSparse Toolbox-')
-%             [obj.opt.cov, ~] = sparseinv(obj.opt.info_mat); 
+
+            % Covariance Extraction using SuiteSparse Toolbox            
+            % Also obtain covariance matrix of each lane points
+            obj.recCov();       
 
             if obj.plot_flag
                 obj.plotRes();
             end
+            % Lane Point reordering
+%             obj.reorderLP();
 
-%             if strcmp(obj.mode,'full') || strcmp(obj.mode,'2-phase')
-%                 % Lane Point reordering
-%                 obj.reorderLP();
-%         
-%             end
         end
         
+        %% Covariance Recovery
+        function obj = recCov(obj)
+            obj.opt.info_mat = obj.opt.jac' * obj.opt.jac;
+            disp('-Recovering Covariance using SuiteSparse Toolbox-')
+            [obj.opt.cov, ~] = sparseinv(obj.opt.info_mat); 
+
+            [m,n] = size(obj.ins.state_saver);
+            
+            obj.opt.lml_cov = zeros(4*n,obj.prev_num);
+            obj.opt.lmr_cov = obj.opt.lml_cov;
+            obj.opt.w_l = zeros(n,obj.prev_num);
+            obj.opt.w_r = obj.opt.w_l;
+
+            for i=1:n
+                Xi = obj.opt.states(:,i);
+                x_idx = 1+m*(i-1)+1; y_idx = x_idx + 1;
+                psi_idx = 1+m*(i-1)+9;
+                psi = Xi(9);
+                for j=1:obj.prev_num
+                    l_idx = 1+m*n+(i-1)*obj.prev_num+j;
+                    r_idx = 1+m*n+(n+i-1)*obj.prev_num+j;
+
+                    l = obj.opt.latL(i,j);
+                    r = obj.opt.latR(i,j);
+
+                    vec_l = [1 0 -10*(j-1)*sin(psi)-l*cos(psi) -sin(psi);
+                             0 1 10*(j-1)*cos(psi)-l*sin(psi) cos(psi) ];
+                    
+                    vec_r = [1 0 -10*(j-1)*sin(psi)-r*cos(psi) -sin(psi);
+                             0 1 10*(j-1)*cos(psi)-r*sin(psi) cos(psi)];
+
+                    idxs_l = [x_idx,y_idx,psi_idx,l_idx];
+                    cov_l = obj.opt.cov(idxs_l,idxs_l);
+
+                    idxs_r = [x_idx,y_idx,psi_idx,r_idx];
+                    cov_r = obj.opt.cov(idxs_r,idxs_r);
+                    
+                    obj.opt.lml_cov(4*i-3:4*i,j) = reshape(vec_l * cov_l * vec_l',4,1);
+                    obj.opt.lmr_cov(4*i-3:4*i,j) = reshape(vec_r * cov_r * vec_r',4,1);
+                    obj.opt.w_l(i,j) = obj.opt.cov(l_idx,l_idx);
+                    obj.opt.w_r(i,j) = obj.opt.cov(r_idx,r_idx);
+                end
+            end
+
+        end
+
         %% Optimization Cost Function
         function [res, jac] = cost_func(obj, x0)
             
@@ -261,9 +406,7 @@ classdef Optimizer_LinV4 < handle
                         lml(2*i-1:2*i,j) = getLP(Xi,latL(i,j),j);
                         lmr(2*i-1:2*i,j) = getLP(Xi,latR(i,j),j);
                     end
-                end
-                
-                obj.PreProcessing(states, lml, lmr); % Pre-Processing for every function iteration
+                end                                
             else
                 latL = []; latR = [];
             end
@@ -287,34 +430,24 @@ classdef Optimizer_LinV4 < handle
             p_gnss = plot(gnss_x, gnss_y,'gx'); hold on; axis equal; grid on;
             p_opt2 = plot(x, y,'b.'); 
             p_opt1 = plot(x(obj.gnss.idxs-obj.dstart+1), y(obj.gnss.idxs-obj.dstart+1),'r.');
-            
-            if strcmp(obj.mode,'full') 
-                                
-                for i=1:obj.prev_num
-                    opt_lml = reshape(lml(:,i),2,[]);
-                    opt_lmr = reshape(lmr(:,i),2,[]);                        
-                    p_left = plot(opt_lml(1,:), opt_lml(2,:));
-                    p_right = plot(opt_lmr(1,:), opt_lmr(2,:));
-                end
+                 
+            for i=1:obj.prev_num
+                opt_lml = reshape(lml(:,i),2,[]);
+                opt_lmr = reshape(lmr(:,i),2,[]);                        
+                p_left = plot(opt_lml(1,:), opt_lml(2,:));
+                p_right = plot(opt_lmr(1,:), opt_lmr(2,:));
             end
+        
             p_gt = plot(obj.lane.posx(obj.dstart:obj.dend), obj.lane.posy(obj.dstart:obj.dend),'k--');
-            xlabel('Longitude(Deg)'); ylabel('Latitude(Deg)'); 
+            xlabel('Global X'); ylabel('Global Y'); 
+            title('GNSS + INS + WSS + Lane Detection Sensor Fusion via MAP');
+            legend([p_opt1 p_opt2 p_gt p_gnss p_left p_right],...
+                   'Optimized Trajectory(w GNSS)','Optimized Trajectory(w/o GNSS)',...
+                   'Ground Truth','GNSS Measurement(Ublox)',...
+                   'Optimized Left Lane', 'Optimized Right Lane');            
             
-            
-            if strcmp(obj.mode,'full')
-                title('GNSS + INS + WSS + Lane Detection Sensor Fusion via MAP');
-                legend([p_opt1 p_opt2 p_gt p_gnss p_left p_right],...
-                       'Optimized Trajectory(w GNSS)','Optimized Trajectory(w/o GNSS)',...
-                       'Ground Truth','GNSS Measurement(Ublox)',...
-                       'Optimized Left Lane', 'Optimized Right Lane');
-            
-            elseif strcmp(obj.mode,'partial')
-                title('GNSS + INS + WSS Sensor Fusion via MAP');
-                legend([p_opt1, p_opt2, p_gt, p_gnss],...
-                       'Optimized Trajectory(w GNSS)','Optimized Trajectory(w/o GNSS)',...
-                       'Ground Truth','GNSS Measurement(Ublox)')
-            end
             hold off;
+            
         end
         
         %% Data Pre-Processing (Association)
@@ -590,78 +723,78 @@ classdef Optimizer_LinV4 < handle
         function obj = CreateMEBlock(obj, states, latL, latR)
             
             if strcmp(obj.mode,'full') 
-                [m,n] = size(states);
-                x = 0:10:10*(obj.prev_num-1);
-                blk_height = sum(obj.opt.assoc_idxsL(:,1:obj.prev_num),'all') + ...
-                             sum(obj.opt.assoc_idxsR(:,1:obj.prev_num),'all');
+                [m,n] = size(states);                
+%                 blk_height = sum(obj.opt.assoc_idxsL(:,1:obj.prev_num),'all') + ...
+%                              sum(obj.opt.assoc_idxsR(:,1:obj.prev_num),'all');
+                blk_height = obj.opt.ME_blkHeight;
                 blk_width = m*n + 2*obj.prev_num*n;
                 cnt = 1;
                 ME_vec = zeros(blk_height,1);
-                I = zeros(1,7*blk_height); J = I; V = I;
+                I = zeros(1,9*blk_height); J = I; V = I;
                 for i=2:n
                     Xi = states(:,i);
 
                     for j=1:obj.prev_num
                         k_max_l = obj.opt.assoc_idxsL(i,j);
                         k_max_r = obj.opt.assoc_idxsR(i,j);
+                        
+                        % If i-th frame is a keyframe, perform full
+                        % association. Else, perform only the last ones
+
+                        if isempty(find(ismember(obj.opt.keyframeIdxs,i),1))
+                            k_start_l = k_max_l;
+                            k_start_r = k_max_r;
+                            if k_max_l == 0
+                                k_start_l = 1;
+                            end
+
+                            if k_max_r == 0
+                                k_start_r = 1;
+                            end
+                        else
+                            k_start_l = 1;
+                            k_start_r = 1;
+                        end
 
                         % Left Lane
-                        for k=1:k_max_l
+                        for k=k_start_l:k_max_l
                             Xt = states(:,i-k);
                             lt_l = latL(i-k,j);               
 
-                            [Jxt,Jxi,Jlt_l] = JacobianME2(Xt,Xi,lt_l,j,latL,i);
-                            x_rel = Zpred_l(1); y_rel = Zpred_l(2);
-                            
-                            
-                            
-                            Lalp = latL(i,indic);
-                            Lalpp1 = latL(i,indic+1);
-                            
-
-                            y = LatL(i,1:obj.prev_num);
-                            cov = obj.output.cam.lstd_inter(obj.dstart+i-1,1:obj.prev_num);
-                            y_meas = interp1(x,y,x_rel,'extrap');
-                            cov_l = interp1(x,cov,x_rel,'extrap')^2;
-                            
-                            diff_l = -y_meas + y_rel;
-                            ME_vec(cnt) = InvMahalanobis(diff_l,cov_l); 
+                            [Jxt,Jxi,Jlt_l,JLalp_l,JLalpp1_l,resi_l,cov_l,alp] = obj.JacobianME2(Xt,Xi,lt_l,j,latL,i);                         
+                            ME_vec(cnt) = InvMahalanobis(resi_l,cov_l); 
 
                             [I1,J1,V1] = sparseFormat(cnt,m*(i-1)+1:m*(i-1)+2,InvMahalanobis(Jxi(1:2),cov_l));
                             [I2,J2,V2] = sparseFormat(cnt,m*(i-1)+9,InvMahalanobis(Jxi(3),cov_l));
                             [I3,J3,V3] = sparseFormat(cnt,m*(i-k-1)+1:m*(i-k-1)+2,InvMahalanobis(Jxt(1:2),cov_l));
                             [I4,J4,V4] = sparseFormat(cnt,m*(i-k-1)+9,InvMahalanobis(Jxt(3),cov_l));
                             [I5,J5,V5] = sparseFormat(cnt,m*n+(i-k-1)*obj.prev_num+j,InvMahalanobis(Jlt_l,cov_l));
-
-                            I(7*cnt-6:7*cnt) = horzcat(I1,I2,I3,I4,I5);
-                            J(7*cnt-6:7*cnt) = horzcat(J1,J2,J3,J4,J5);
-                            V(7*cnt-6:7*cnt) = horzcat(V1,V2,V3,V4,V5);
+                            [I6,J6,V6] = sparseFormat(cnt,m*n+(i-1)*obj.prev_num+alp,InvMahalanobis(JLalp_l,cov_l));
+                            [I7,J7,V7] = sparseFormat(cnt,m*n+(i-1)*obj.prev_num+alp+1,InvMahalanobis(JLalpp1_l,cov_l));
+                            I(9*cnt-8:9*cnt) = horzcat(I1,I2,I3,I4,I5,I6,I7);
+                            J(9*cnt-8:9*cnt) = horzcat(J1,J2,J3,J4,J5,J6,J7);
+                            V(9*cnt-8:9*cnt) = horzcat(V1,V2,V3,V4,V5,V6,V7);
 
                             cnt = cnt + 1;
                         end
                         % Right Lane
-                        for k=1:k_max_r
+                        for k=k_start_r:k_max_r
                             Xt = states(:,i-k);
-                            lt_r = latR(i-k,j);
-                            [Jxt,Jxi,Jlt_r,Zpred_r] = JacobianME2(Xt,Xi,lt_r,j);
+                            lt_r = latR(i-k,j);                            
 
-                            x_rel = Zpred_r(1); y_rel = Zpred_r(2);
-                            y = obj.output.cam.r_inter(obj.dstart+i-1,1:obj.prev_num);
-                            cov = obj.output.cam.rstd_inter(obj.dstart+i-1,1:obj.prev_num);
-                            y_meas = interp1(x,y,x_rel);
-                            cov_r = interp1(x,cov,x_rel)^2;
+                            [Jxt,Jxi,Jlt_r,JLalp_r,JLalpp1_r,resi_r,cov_r,alp] = obj.JacobianME2(Xt,Xi,lt_r,j,latR,i);                         
+                            ME_vec(cnt) = InvMahalanobis(resi_r,cov_r); 
 
-                            diff_r = -y_meas + y_rel;
-                            ME_vec(cnt) = InvMahalanobis(diff_r,cov_r); 
                             [I1,J1,V1] = sparseFormat(cnt,m*(i-1)+1:m*(i-1)+2,InvMahalanobis(Jxi(1:2),cov_r));
                             [I2,J2,V2] = sparseFormat(cnt,m*(i-1)+9,InvMahalanobis(Jxi(3),cov_r));
                             [I3,J3,V3] = sparseFormat(cnt,m*(i-k-1)+1:m*(i-k-1)+2,InvMahalanobis(Jxt(1:2),cov_r));
                             [I4,J4,V4] = sparseFormat(cnt,m*(i-k-1)+9,InvMahalanobis(Jxt(3),cov_r));
                             [I5,J5,V5] = sparseFormat(cnt,m*n+(n+i-k-1)*obj.prev_num+j,InvMahalanobis(Jlt_r,cov_r));
-
-                            I(7*cnt-6:7*cnt) = horzcat(I1,I2,I3,I4,I5);
-                            J(7*cnt-6:7*cnt) = horzcat(J1,J2,J3,J4,J5);
-                            V(7*cnt-6:7*cnt) = horzcat(V1,V2,V3,V4,V5);
+                            [I6,J6,V6] = sparseFormat(cnt,m*n+(n+i-1)*obj.prev_num+alp,InvMahalanobis(JLalp_r,cov_r));
+                            [I7,J7,V7] = sparseFormat(cnt,m*n+(n+i-1)*obj.prev_num+alp+1,InvMahalanobis(JLalpp1_r,cov_r));
+                            I(9*cnt-8:9*cnt) = horzcat(I1,I2,I3,I4,I5,I6,I7);
+                            J(9*cnt-8:9*cnt) = horzcat(J1,J2,J3,J4,J5,J6,J7);
+                            V(9*cnt-8:9*cnt) = horzcat(V1,V2,V3,V4,V5,V6,V7);
 
                             cnt = cnt + 1;
                         end
@@ -956,21 +1089,49 @@ classdef Optimizer_LinV4 < handle
         function obj = reorderLP(obj)
             
             % Need to modify accessing covariance part
-            disp('-Lane Point Re-ordering for Parametrization-')
-            [m,n] = size(obj.ins.state_saver);
+            disp('-Lane Point Re-ordering for Parametrization-')            
             
             lml_pc = reshape(reshapeLP(obj.opt.lml),2,[]);
             lmr_pc = reshape(reshapeLP(obj.opt.lmr),2,[]);
             
-            lml_cov = extractCov(obj.opt.cov(2+m*n:1+m*n+2*n*obj.prev_num,2+m*n:1+m*n+2*n*obj.prev_num));
-            lmr_cov = extractCov(obj.opt.cov(2+m*n+2*n*obj.prev_num:end,2+m*n+2*n*obj.prev_num:end));           
+            lml_cov = reshapeCov(obj.opt.lml_cov);
+            lmr_cov = reshapeCov(obj.opt.lmr_cov);   
 
             [obj.opt.reordered_lml_pc, obj.opt.reordered_lmr_pc, ...
-             obj.opt.reordered_lml_cov, obj.opt.reordered_lmr_cov] = sortLP(lml_pc, lmr_pc, lml_cov, lmr_cov);
+             obj.opt.reordered_lml_cov, obj.opt.reordered_lmr_cov, obj.opt.reordered_leftIdxs] = sortLP(lml_pc, lmr_pc, lml_cov, lmr_cov);
+
+            obj.opt.reordered_lml_w = obj.opt.w_l(obj.opt.reordered_lml_pc(3,:));
+            obj.opt.reordered_lmr_w = obj.opt.w_l(obj.opt.reordered_lmr_pc(3,:));
+        end
+        
+        %% Compute Measurement Jacobian Block Height
+        function obj = blkHeight(obj)
+           % Left Lane assoc
+           cnt = 0;
+           n = size(obj.opt.assoc_idxsL);
+           for i=1:n               
+               if ~isempty(find(ismember(obj.opt.keyframeIdxs,i),1))
+                  % Keyframe
+                  cnt = cnt + sum(obj.opt.assoc_idxsL(i,:)) + sum(obj.opt.assoc_idxsR(i,:));
+               else
+                  % Non-Keyframe
+                  cnt = cnt + 2 * obj.prev_num;
+                  for j=1:obj.prev_num
+                      if obj.opt.assoc_idxsL(i,j) == 0
+                          cnt = cnt - 1;
+                      end
+
+                      if obj.opt.assoc_idxsR(i,j) == 0
+                          cnt = cnt - 1;
+                      end
+                  end
+               end              
+           end
+           obj.opt.ME_blkHeight = cnt;
         end
 
         %% Compute Measurement Jacobian
-        function [Jxt,Jxo,Jlt,JLalp,JLalpp1,resi] = JacobianME2(obj,X_t,X_o,l_t,idx,lat,i)
+        function [Jxt,Jxo,Jlt,JLalp,JLalpp1,resi,cov,indic] = JacobianME2(obj,X_t,X_o,l_t,idx,lat,i)
             x_t = X_t(1); y_t = X_t(2); psi_t = X_t(9);
             x_o = X_o(1); y_o = X_o(2); psi_o = X_o(9);
             L_tj  = [x_t + 10*(idx-1)*cos(psi_t) - l_t*sin(psi_t);
@@ -980,17 +1141,22 @@ classdef Optimizer_LinV4 < handle
             Xb = [cos(psi_o) sin(psi_o);-sin(psi_o) cos(psi_o)] * delX;
             xb = Xb(1); yb = Xb(2);
 
-            indic = floor(x_b/10)+1;  % Indicator for preview number lower bound     
+            indic = floor(xb/10)+1;  % Indicator for preview number lower bound     
             if indic < 1
                 indic = 1;
             elseif indic >= obj.prev_num
                 indic = obj.prev_num-1;
             end
             Lalp = lat(i,indic);
-            Lalpp1 = lat(i)
+            Lalpp1 = lat(i,indic+1);
             ymeas = (Lalpp1 - Lalp)/10 * (xb - 10*(indic-1)) + Lalp;
         
             resi = yb - ymeas;
+            
+            x = 0:10:10*(obj.prev_num-1);
+            cov_ = obj.output.cam.lstd_inter(obj.dstart+i-1,1:obj.prev_num);
+            cov = interp1(x,cov_,xb,'linear','extrap')^2;
+
             Jxt = zeros(1,3);
             Jxt(1) = -sin(psi_o); Jxt(2) = cos(psi_o); 
             Jxt(3) = cos(psi_o)*(cos(psi_t)*(10*idx - 10) - l_t*sin(psi_t)) + sin(psi_o)*(sin(psi_t)*(10*idx - 10) + l_t*cos(psi_t));
@@ -1006,6 +1172,7 @@ classdef Optimizer_LinV4 < handle
             JLalpp1 = indic - (sin(psi_o)*(y_t - y_o + sin(psi_t)*(10*idx - 10) + l_t*cos(psi_t)))/10 + (cos(psi_o)*(x_o - x_t - cos(psi_t)*(10*idx - 10) + l_t*sin(psi_t)))/10 - 1;
         
         end
+
     end
 end
 
@@ -1060,18 +1227,6 @@ function X_next = StatePred(X_curr, u, dt)
     
     X_next = vertcat(p_n, v_n, r_n, ab_n, wb_n);
 end
-
-%% Lane Point Prediction
-% function L_next = LanePred(X_next, Lij, Lijp1, idx)
-%     
-%     L_next = zeros(2,1);
-%     
-%     x = X_next(1); y = X_next(2); psi = X_next(9);
-%     lijp1x = Lijp1(1); lijp1y = Lijp1(2);
-%     lijx = Lij(1); lijy = Lij(2);
-%     L_next(1) = x + cos(psi)*(10*idx - 10) - (sin(psi)*(lijy - y - sin(psi)*(10*idx - 10) + ((lijy - lijp1y)*(x - lijx + cos(psi)*(10*idx - 10)))/(lijx - lijp1x)))/(cos(psi) + (sin(psi)*(lijy - lijp1y))/(lijx - lijp1x));
-%     L_next(2) = y + sin(psi)*(10*idx - 10) + (cos(psi)*(lijy - y - sin(psi)*(10*idx - 10) + ((lijy - lijp1y)*(x - lijx + cos(psi)*(10*idx - 10)))/(lijx - lijp1x)))/(cos(psi) + (sin(psi)*(lijy - lijp1y))/(lijx - lijp1x));
-% end
 
 %% Body Frame velocity computation
 function V_b = VelMeas(X,wsf,ls,wz)
@@ -1159,17 +1314,19 @@ function res = reshapeLP(LP)
 end
 
 %% Extract covariance from information matrix
-function colCov = extractCov(cov_mat)
-    n = size(cov_mat,1)/2;
-    colCov = zeros(4,n);
+function cov = reshapeCov(cov_mat)
+    n = size(cov_mat,1)/4;
+    prev_num = size(cov_mat,2);
+    cov = zeros(4,prev_num*n);
+
     for i=1:n
-        cov = cov_mat(2*i-1:2*i,2*i-1:2*i);
-        colCov(:,i) = reshape(cov,4,1);
+        cov_ = cov_mat(4*i-3:4*i,:);
+        cov(:,prev_num*(i-1)+1:prev_num*i) = cov_;
     end
 end
 
 %% Sort LP using nearest Neighbor
-function [pc_re_l, pc_re_r, cov_re_l, cov_re_r] = sortLP(pc_l, pc_r, covs_l, covs_r)
+function [pc_re_l, pc_re_r, cov_re_l, cov_re_r, left_idxs] = sortLP(pc_l, pc_r, covs_l, covs_r)
     search_idx = 1; 
     n = size(pc_l,2);
     
@@ -1186,7 +1343,7 @@ function [pc_re_l, pc_re_r, cov_re_l, cov_re_r] = sortLP(pc_l, pc_r, covs_l, cov
     cov_re_r = covs_r(:,1);
 
     % Phase 1: Sort Lane Points by iteratively finding the nearest point
-    disp('Phase1: Nearest Neighbor Search')
+    disp('[Nearest Neighbor Search]')
     while search_idx ~= n
         px_l = pc_l(1,search_idx); py_l = pc_l(2,search_idx);
         px_r = pc_r(1,search_idx); py_r = pc_r(2,search_idx);
@@ -1205,56 +1362,82 @@ function [pc_re_l, pc_re_r, cov_re_l, cov_re_r] = sortLP(pc_l, pc_r, covs_l, cov
         cov_re_r = [cov_re_r covs_r(:,search_idx)];
     end
 
-    left_pc_l = pc_lcpyd; left_pc_r = pc_rcpyd;
-    left_cov_l = cov_lcpyd; left_cov_r = cov_rcpyd;
-    
-    % Phase 2: Fill in left points
-    disp('Phase2: Fill in left out points')
-    n = size(left_pc_l,2);
-    for i=1:n
-        px_l = left_pc_l(1,i); py_l = left_pc_l(2,i);
-        px_r = left_pc_r(1,i); py_r = left_pc_r(2,i);
-
-        d = (pc_re_l(1,:) - px_l).^2 + (pc_re_l(2,:) - py_l).^2 + ...
-            (pc_re_r(1,:) - px_r).^2 + (pc_re_l(2,:) - py_r).^2;
-        [~,idx] = min(d);
-
-        if d(idx-1) > d(idx+1)
-            pc_re_l = horzcat(pc_re_l(:,1:idx), left_pc_l(:,i), pc_re_l(:,idx+1:end));
-            pc_re_r = horzcat(pc_re_r(:,1:idx), left_pc_r(:,i), pc_re_r(:,idx+1:end));
-            cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
-            cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
-        else
-            pc_re_l = horzcat(pc_re_l(:,1:idx-1), left_pc_l(:,i), pc_re_l(:,idx:end));
-            pc_re_r = horzcat(pc_re_r(:,1:idx-1), left_pc_r(:,i), pc_re_r(:,idx:end));
-            cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
-            cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
-        end
+    left_pc_l = pc_lcpyd; 
+%     left_pc_r = pc_rcpyd;
+%     left_cov_l = cov_lcpyd; left_cov_r = cov_rcpyd;
+    disp(['Number of left out points at Phase 1: ',num2str(size(left_pc_l,2))])
+    for i=1:size(left_pc_l,2)
+        disp(['Left out index ',num2str(i),' : ',num2str(left_pc_l(3,i))])
     end
+    left_idxs = left_pc_l(3,:);
+
+    % Phase 2: Fill in left points : Remove for stability
+%     disp('[Phase2: Fill in left out points]')
+%     n = size(left_pc_l,2);
+%     for i=1:n
+%         px_l = left_pc_l(1,i); py_l = left_pc_l(2,i);
+%         px_r = left_pc_r(1,i); py_r = left_pc_r(2,i);
+% 
+%         d = (pc_re_l(1,:) - px_l).^2 + (pc_re_l(2,:) - py_l).^2 + ...
+%             (pc_re_r(1,:) - px_r).^2 + (pc_re_l(2,:) - py_r).^2;
+%         [~,idx] = min(d);
+% 
+%         if d(idx-1) > d(idx+1)
+%             pc_re_l = horzcat(pc_re_l(:,1:idx), left_pc_l(:,i), pc_re_l(:,idx+1:end));
+%             pc_re_r = horzcat(pc_re_r(:,1:idx), left_pc_r(:,i), pc_re_r(:,idx+1:end));
+%             cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
+%             cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
+%         else
+%             pc_re_l = horzcat(pc_re_l(:,1:idx-1), left_pc_l(:,i), pc_re_l(:,idx:end));
+%             pc_re_r = horzcat(pc_re_r(:,1:idx-1), left_pc_r(:,i), pc_re_r(:,idx:end));
+%             cov_re_l = horzcat(cov_re_l(:,1:idx), left_cov_l(:,i), cov_re_l(:,idx+1:end));
+%             cov_re_r = horzcat(cov_re_r(:,1:idx), left_cov_r(:,i), cov_re_r(:,idx+1:end));
+%         end
+%     end
+%     for i=1:length(left_idxs)
+%         left_idxs(i) = find(pc_re_l(3,:) == left_idxs(i));
+%     end
 
     % Phase 3: Perform Circular Fitting and finish re-ordering
-    disp('Phase 3: Perform Circular Fitting to accurately order points')
-    
-    fit_length = 20;
-    n = size(pc_re_l,2);
-    for i=1:n-fit_length+1
-        disp(num2str('Iteration: ',num2str(i)))
-        [res,~] = Circle2DFitV2(pc_re_l,pc_re_r,cov_re_l,cov_re_r,0.9,[i i+fit_length-1],false);
-        if res.th(1) < res.th(end)
-            [~,sorted_idxs] = sort(res.th);
-        else
-            [~,sorted_idxs] = sort(res.th,'descend');
-        end
-        disp(sorted_idxs)
-        
-        pcs_l = pc_re_l(:,i:i+fit_length-1);
-        pcs_r = pc_re_r(:,i:i+fit_length-1);
-        covs_l = cov_re_l(:,i:i+fit_length-1);
-        covs_r = cov_re_r(:,i:i+fit_length-1);
-        
-        pc_re_l(:,i:i+fit_length-1) = pcs_l(:,sorted_idxs);
-        pc_re_r(:,i:i+fit_length-1) = pcs_r(:,sorted_idxs);
-        cov_re_l(:,i:i+fit_length-1) = covs_l(:,sorted_idxs);
-        cov_re_r(:,i:i+fit_length-1) = covs_r(:,sorted_idxs);
+%     disp('Phase 3: Perform Circular Fitting to accurately order points')
+%     
+%     fit_length = 20;
+%     n = size(pc_re_l,2);
+%     for i=1:n-fit_length+1
+%         disp(num2str('Iteration: ',num2str(i)))
+%         [res,~] = Circle2DFitV2(pc_re_l,pc_re_r,cov_re_l,cov_re_r,0.9,[i i+fit_length-1],false);
+%         if res.th(1) < res.th(end)
+%             [~,sorted_idxs] = sort(res.th);
+%         else
+%             [~,sorted_idxs] = sort(res.th,'descend');
+%         end
+%         disp(sorted_idxs)
+%         
+%         pcs_l = pc_re_l(:,i:i+fit_length-1);
+%         pcs_r = pc_re_r(:,i:i+fit_length-1);
+%         covs_l = cov_re_l(:,i:i+fit_length-1);
+%         covs_r = cov_re_r(:,i:i+fit_length-1);
+%         
+%         pc_re_l(:,i:i+fit_length-1) = pcs_l(:,sorted_idxs);
+%         pc_re_r(:,i:i+fit_length-1) = pcs_r(:,sorted_idxs);
+%         cov_re_l(:,i:i+fit_length-1) = covs_l(:,sorted_idxs);
+%         cov_re_r(:,i:i+fit_length-1) = covs_r(:,sorted_idxs);
+%     end
+end
+
+%% Find circle radius from 3 2Dpoints
+function R = fitCircle(X,Y)
+    if length(X) > 3 || length(Y) > 3
+        error('Input 3 points only')
     end
+    x1 = X(1); x2 = X(2); x3 = X(3);
+    y1 = Y(1); y2 = Y(2); y3 = Y(3);
+    m12 = (y2 - y1)/(x2 - x1);
+    m23 = (y3 - y2)/(x3 - x2); 
+    x12 = 1/2 * (x1 + x2); y12 = 1/2 * (y1 + y2);
+    x23 = 1/2 * (x2 + x3); y23 = 1/2 * (y2 + y3);
+
+    xc = (x12/m12 + y12 - x23/m23 - y23)/(1/m12 - 1/m23);
+    yc = -1/m12 * (xc - x12) + y12;
+    R = sqrt((xc-x1)^2 + (yc-y1)^2);
 end
